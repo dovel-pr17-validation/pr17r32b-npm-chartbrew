@@ -1,0 +1,56 @@
+import React, { useEffect, useRef } from "react";
+import { useDispatch, useSelector } from "react-redux";
+import { Separator } from "@heroui/react";
+
+
+import WebhookIntegrationsList from "./components/WebhookIntegrationsList";
+import {
+  getTeamIntegrations,
+} from "../../slices/integration";
+import { selectTeam } from "../../slices/team";
+import SlackIntegrationsList from "./components/SlackIntegrationsList";
+
+function Integrations() {
+  const dispatch = useDispatch();
+
+  const team = useSelector(selectTeam);
+  const initRef = useRef(false);
+
+  useEffect(() => {
+    if (team?.id && !initRef.current) {
+      dispatch(getTeamIntegrations({ team_id: team?.id }));
+      initRef.current = true;
+    }
+  }, [team]);
+
+  return (
+    <div className="flex flex-col">
+      <div className="flex flex-row items-center">
+        <div className="flex flex-col gap-1">
+          <div className="text-2xl font-semibold font-tw">
+            Integrations
+          </div>
+          <div className="text-sm text-foreground-500">
+            {"Create and manage your integrations with external services"}
+          </div>
+        </div>
+      </div>
+
+      <div className="h-4" />
+
+      <div className="flex flex-col bg-surface p-4 rounded-3xl border border-divider">
+        <WebhookIntegrationsList
+          teamId={team?.id}
+        />
+        <div className="h-8" />
+        <Separator />
+        <div className="h-8" />
+        <SlackIntegrationsList
+          teamId={team?.id}
+        />
+      </div>
+    </div>
+  );
+}
+
+export default Integrations;

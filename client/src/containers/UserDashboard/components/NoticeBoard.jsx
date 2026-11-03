@@ -1,0 +1,106 @@
+import {
+  Button, Card, Separator, Tooltip,
+} from "@heroui/react";
+import React, { useState } from "react"
+import { LuCirclePlay, LuShieldCheck, LuX } from "react-icons/lu";
+import { useDispatch, useSelector } from "react-redux";
+import { Link } from "react-router";
+
+import { completeTutorial, selectUser } from "../../../slices/user";
+import startVideoThumbnail from "../../../assets/quick-start-video.jpg";
+import QuickStartVideo from "../../../components/QuickStartVideo";
+
+function NoticeBoard() {
+  const [showQuickStart, setShowQuickStart] = useState(false);
+
+  const user = useSelector(selectUser);
+
+  const dispatch = useDispatch();
+
+  const _onCompleteTutorials = (data) => {
+    dispatch(completeTutorial({ user_id: user.id, tutorial: data }));
+  };
+
+  return (
+    <div className="flex flex-col gap-1">
+      {!user?.tutorials?.quickStartVideo && (
+        <Card className="mt-4 hidden sm:block shadow-sm">
+          <Card.Header className="flex flex-row items-center justify-between gap-2">
+            <span className="font-medium">Quick start guide</span>
+            <Tooltip>
+              <Tooltip.Trigger>
+                <span className="text-default-500 cursor-pointer" onClick={() => _onCompleteTutorials({ quickStartVideo: true })}>
+                  <LuX />
+                </span>
+              </Tooltip.Trigger>
+              <Tooltip.Content>Close the guide</Tooltip.Content>
+            </Tooltip>
+          </Card.Header>
+          <Separator />
+          <Card.Content>
+            <div className="relative pb-[60.25%] h-0 mb-4">
+              <img
+                src={startVideoThumbnail}
+                alt="Chartbrew quick start video"
+                className="absolute inset-0 h-full w-full cursor-pointer rounded-md object-cover"
+                onClick={() => setShowQuickStart(true)}
+              />
+              <div className="absolute inset-0 w-full h-full flex flex-col justify-center items-center z-50">
+                <Button
+                  variant="tertiary"
+                  color="primary"
+                  onPress={() => setShowQuickStart(true)}
+                  size="lg"
+                >
+                  Watch video
+                  <LuCirclePlay />
+                </Button>
+              </div>
+            </div>
+          </Card.Content>
+        </Card>
+      )}
+
+      {!user?.tutorials?.twoFactorAuth && user?.User2fas && user?.User2fas?.length < 1 && (
+        <Card className="mt-4 hidden sm:block shadow-sm">
+          <Card.Header className="flex flex-row items-center justify-between gap-2">
+            <span className="font-medium">Two-factor Authentication</span>
+            <Tooltip>
+              <Tooltip.Trigger>
+                <span className="text-default-500 cursor-pointer" onClick={() => _onCompleteTutorials({ twoFactorAuth: true })}>
+                  <LuX />
+                </span>
+              </Tooltip.Trigger>
+              <Tooltip.Content>Close the guide</Tooltip.Content>
+            </Tooltip>
+          </Card.Header>
+          <Separator />
+          <Card.Content>
+            <p>
+              {"Protect your account by enabling two-factor authentication. It's easy and only takes a few moments."}
+            </p>
+          </Card.Content>
+          <Separator />
+          <Card.Footer>
+            <Link to="/user/profile" className="w-full">
+              <Button
+                color="primary"
+                fullWidth
+                className="pointer-events-none"
+              >
+                Set up 2FA
+                <LuShieldCheck />
+              </Button>
+            </Link>
+          </Card.Footer>
+        </Card>
+      )}
+
+      {showQuickStart && (
+        <QuickStartVideo onClose={() => setShowQuickStart(false)} isOpen={showQuickStart} />
+      )}
+    </div>
+  );
+}
+
+export default NoticeBoard

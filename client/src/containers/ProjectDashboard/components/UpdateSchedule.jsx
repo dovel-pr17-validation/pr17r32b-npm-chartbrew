@@ -1,0 +1,370 @@
+import React, { useEffect, useState } from "react"
+import PropTypes from "prop-types";
+import { Autocomplete, Button, Separator, EmptyState, Input, Label, Link, ListBox, Modal, SearchField, Select, TimeField, useFilter } from "@heroui/react";
+import timezones from "../../../modules/timezones";
+import { LuMapPin, LuMonitorUp } from "react-icons/lu";
+import { getProject, selectProject, updateProject } from "../../../slices/project";
+import { useDispatch, useSelector } from "react-redux";
+import toast from "react-hot-toast";
+import { Time } from "@internationalized/date";
+import { selectCharts, updateChart } from "../../../slices/chart";
+import ScheduleDaysOfWeek, { allDayValues, daysOfWeek, hasValidDailyDays } from "./ScheduleDaysOfWeek";
+
+const getMachineTimezone = () => {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone;
+};
+
+function UpdateSchedule({ isOpen, onClose, openSnapshotSchedule }) {
+  const project = useSelector(selectProject);
+  const charts = useSelector(selectCharts)?.filter((chart) => chart.project_id === project.id);
+
+  const [schedule, setSchedule] = useState({
+    timezone: project.timezone || getMachineTimezone(),
+  });
+  const [isLoading, setIsLoading] = useState(false);
+  const [removingUpdates, setRemovingUpdates] = useState(false);
+  const { contains } = useFilter({ sensitivity: "base" });
+  const dispatch = useDispatch();
+
+  useEffect(() => {
+    if (!isOpen || !project?.id) {
+      return;
+    }
+
+    setSchedule({
+      timezone: project.timezone || project?.updateSchedule?.timezone || getMachineTimezone(),
+      frequency: project.updateSchedule?.frequency || undefined,
+      dayOfWeek: project.updateSchedule?.dayOfWeek || undefined,
+      daysOfWeek: project.updateSchedule?.daysOfWeek || undefined,
+      frequencyNumber: project.updateSchedule?.frequencyNumber || undefined,
+      time: project.updateSchedule?.time ? new Time(project.updateSchedule.time?.hour, project.updateSchedule.time?.minute) : undefined,
+    });
+  }, [isOpen, project?.id, project?.timezone, project?.updateSchedule]);
+
+  const frequencies = [
+    { label: "Daily", value: "daily" },
+    { label: "Weekly", value: "weekly" },
+    { label: "Every X days", value: "every_x_days" },
+    { label: "Every X hours", value: "every_x_hours" },
+    { label: "Every X minutes", value: "every_x_minutes" },
+  ];
+
+  const _prepareScheduleForSave = (scheduleData) => {
+    const preparedSchedule = { ...scheduleData };
+
+    if (preparedSchedule.frequency !== "daily") {
+      delete preparedSchedule.daysOfWeek;
+    } else if (!Array.isArray(preparedSchedule.daysOfWeek)
+      || preparedSchedule.daysOfWeek.length === allDayValues.length) {
+      delete preparedSchedule.daysOfWeek;
+    }
+
+    return preparedSchedule;
+  };
+
+  const _onSave = async () => {
+    setIsLoading(true);
+    const { timezone, ...updateScheduleData } = schedule;
+    const updateSchedule = _prepareScheduleForSave(updateScheduleData);
+    const response = await dispatch(updateProject({
+      project_id: project.id,
+      data: {
+        timezone,
+        updateSchedule,
+      },
+    }));
+
+    await dispatch(getProject({ project_id: project.id, active: true }));
+
+    if (response?.error?.message) {
+      toast.error(response.error.message, { autoClose: 2000 });
+    } else {
+      toast.success("Schedule updated", { autoClose: 2000 });
+      onClose();
+    }
+
+    setIsLoading(false);
+  };
+
+  const _areChartsUpdating = () => {
+    if (!charts) return false;
+    return charts.some((chart) => chart.autoUpdate && chart.autoUpdate > 0);
+  };
+
+  const _disableIndividualChartUpdates = async () => {
+    setRemovingUpdates(true);
+    await Promise.all(charts.map(async (chart) => {
+      if (chart.autoUpdate && chart.autoUpdate > 0) {
+        await dispatch(updateChart({
+          project_id: project.id,
+          chart_id: chart.id,
+          data: { autoUpdate: 0 },
+          justUpdates: true,
+        }));
+      }
+    }));
+
+    await dispatch(getProject({ project_id: project.id, active: true }));
+
+    setRemovingUpdates(false);
+  };
+
+  const _canSave = () => {
+    // validate if any information is missing from the schedule
+    if (!schedule.frequency) {
+      return false;
+    }
+
+    if (schedule.frequency === "weekly" && (!schedule.dayOfWeek || !schedule.time)) {
+      return false;
+    }
+
+    if (schedule.frequency === "daily" && !schedule.time) {
+      return false;
+    }
+
+    if (schedule.frequency === "daily" && !hasValidDailyDays(schedule.daysOfWeek)) {
+      return false;
+    }
+
+    if (schedule.frequency === "every_x_days" && (!schedule.frequencyNumber || !schedule.time)) {
+      return false;
+    }
+
+    if (schedule.frequency === "every_x_hours" && !schedule.frequencyNumber) {
+      return false;
+    }
+
+    if (schedule.frequency === "every_x_minutes" && !schedule.frequencyNumber) {
+      return false;
+    }
+
+    return true;
+  }
+
+  const _disableAutomaticUpdates = async () => {
+    await dispatch(updateProject({
+      project_id: project.id,
+      data: { updateSchedule: {} },
+    }));
+    await dispatch(getProject({ project_id: project.id, active: true }));
+    setSchedule({
+      timezone: project.timezone || getMachineTimezone(),
+    });
+    toast.success("Automatic updates disabled");
+    onClose();
+  };
+
+  return (
+    <Modal.Backdrop
+      isOpen={isOpen}
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <Modal.Container>
+        <Modal.Dialog className="sm:max-w-2xl">
+        <Modal.Header className="flex flex-col">
+          <Modal.Heading>Schedule dashboard updates</Modal.Heading>
+          <div className="text-sm text-gray-500">
+            {"All the charts in this dashboard will be updated at the appointed time"}
+          </div>
+        </Modal.Header>
+        <Modal.Body className="flex flex-col gap-2 p-1">
+          <div className="flex flex-row flex-wrap sm:flex-nowrap items-center gap-2">
+            <Select
+              placeholder="Select update frequency"
+              aria-label="Update frequency"
+              variant="secondary"
+              selectionMode="single"
+              value={schedule.frequency || null}
+              onChange={(value) => setSchedule({ ...schedule, frequency: value })}
+              fullWidth
+            >
+              <Select.Trigger>
+                <Select.Value />
+                <Select.Indicator />
+              </Select.Trigger>
+              <Select.Popover>
+                <ListBox>
+                  {frequencies.map((frequency) => (
+                    <ListBox.Item key={frequency.value} id={frequency.value} textValue={frequency.label}>
+                      {frequency.label}
+                      <ListBox.ItemIndicator />
+                    </ListBox.Item>
+                  ))}
+                </ListBox>
+              </Select.Popover>
+            </Select>
+
+            {schedule.frequency === "weekly" && (
+              <>
+                <div>{"on"}</div>
+                <Select
+                  placeholder="Select day"
+                  aria-label="Update day of week"
+                  variant="secondary"
+                  selectionMode="single"
+                  value={schedule.dayOfWeek || null}
+                  onChange={(value) => setSchedule({ ...schedule, dayOfWeek: value })}
+                  fullWidth
+                >
+                  <Select.Trigger>
+                    <Select.Value />
+                    <Select.Indicator />
+                  </Select.Trigger>
+                  <Select.Popover>
+                    <ListBox>
+                      {daysOfWeek.map((day) => (
+                        <ListBox.Item key={day.value} id={day.value} textValue={day.label}>
+                          {day.label}
+                          <ListBox.ItemIndicator />
+                        </ListBox.Item>
+                      ))}
+                    </ListBox>
+                  </Select.Popover>
+                </Select>
+              </>
+            )}
+
+            {(schedule.frequency === "every_x_days" || schedule.frequency === "every_x_hours" || schedule.frequency === "every_x_minutes") && (
+              <Input
+                placeholder="X"
+                type="number"
+                aria-label="Update frequency"
+                variant="secondary"
+                value={schedule.frequencyNumber}
+                onChange={(e) => setSchedule({ ...schedule, frequencyNumber: e.target.value })}
+                fullWidth
+              />
+            )}
+
+            {(schedule.frequency === "every_x_days" || schedule.frequency === "daily" || schedule.frequency === "weekly") && (
+              <>
+                <div>{"at"}</div>
+                <TimeField
+                  aria-label="Update time"
+                  value={schedule.time}
+                  hourCycle={12}
+                  onChange={(time) => {
+                    setSchedule({ ...schedule, time });
+                  }}
+                  className="min-w-36"
+                  fullWidth
+                >
+                  <TimeField.Group variant="secondary">
+                    <TimeField.Input>
+                      {(segment) => <TimeField.Segment segment={segment} />}
+                    </TimeField.Input>
+                  </TimeField.Group>
+                </TimeField>
+              </>
+            )}
+          </div>
+          {schedule.frequency === "daily" && (
+            <ScheduleDaysOfWeek
+              selectedDays={schedule.daysOfWeek}
+              onChange={(selectedDays) => setSchedule({ ...schedule, daysOfWeek: selectedDays })}
+            />
+          )}
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-row items-center gap-2">
+              <div className="flex flex-col gap-1 w-full">
+                <Autocomplete
+                  placeholder="Select a timezone"
+                  variant="secondary"
+                  selectionMode="single"
+                  value={schedule.timezone || null}
+                  onChange={(value) => {
+                    setSchedule({ ...schedule, timezone: value || "" });
+                  }}
+                  fullWidth
+                  aria-label="Timezone"
+                >
+                  <Label>Dashboard timezone</Label>
+                  <Autocomplete.Trigger>
+                    <Autocomplete.Value />
+                    <Autocomplete.ClearButton />
+                    <Autocomplete.Indicator />
+                  </Autocomplete.Trigger>
+                  <Autocomplete.Popover>
+                    <Autocomplete.Filter filter={contains}>
+                      <SearchField autoFocus name="timezone-search" variant="secondary">
+                        <SearchField.Group>
+                          <SearchField.SearchIcon />
+                          <SearchField.Input placeholder="Search timezones..." />
+                          <SearchField.ClearButton />
+                        </SearchField.Group>
+                      </SearchField>
+                      <ListBox renderEmptyState={() => <EmptyState>No results found</EmptyState>}>
+                        {timezones.map((timezone) => (
+                          <ListBox.Item key={timezone} id={timezone} textValue={timezone}>
+                            {timezone}
+                            <ListBox.ItemIndicator />
+                          </ListBox.Item>
+                        ))}
+                      </ListBox>
+                    </Autocomplete.Filter>
+                  </Autocomplete.Popover>
+                </Autocomplete>
+                <div className="text-xs text-gray-500">
+                  {"Changing this timezone will also update the dashboard timezone."}
+                </div>
+              </div>
+
+              <Button variant="secondary"
+                onPress={() => setSchedule({ ...schedule, timezone: getMachineTimezone() })}
+              >
+                <LuMapPin />
+              </Button>
+            </div>
+          </div>
+          
+          <div className="h-1" />
+          <Separator />
+          <div className="h-1" />
+
+          <Link onPress={openSnapshotSchedule} className="flex flex-row items-center gap-2 cursor-pointer text-sm">
+            <LuMonitorUp />
+            <span>Get your reports delivered to your inbox, slack, and more.</span>
+          </Link>
+        </Modal.Body>
+        <Modal.Footer>
+          {_areChartsUpdating() && (
+            <Button
+              variant="secondary"
+              isPending={removingUpdates}
+              onPress={_disableIndividualChartUpdates}
+            >
+              Disable individual chart updates
+            </Button>
+          )}
+          {project.updateSchedule?.frequency && (
+            <Button variant="danger-soft" onPress={_disableAutomaticUpdates}>
+              {"Disable the schedule"}
+            </Button>
+          )}
+          <Button variant="tertiary" onPress={onClose}>
+            Close
+          </Button>
+          <Button
+            onPress={_onSave}
+            isPending={isLoading}
+            isDisabled={!_canSave()}
+          >
+            {"Save"}
+          </Button>
+        </Modal.Footer>
+        </Modal.Dialog>
+      </Modal.Container>
+    </Modal.Backdrop>
+  )
+}
+
+UpdateSchedule.propTypes = {
+  isOpen: PropTypes.bool.isRequired,
+  onClose: PropTypes.func.isRequired,
+  openSnapshotSchedule: PropTypes.func.isRequired,
+};
+
+export default UpdateSchedule

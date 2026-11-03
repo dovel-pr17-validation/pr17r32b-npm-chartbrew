@@ -1,0 +1,578 @@
+import React, { useState, useEffect } from "react";
+import {
+  Button, Separator, Input, ProgressCircle, Modal, Chip, Table,
+  Alert,
+  TextField,
+  Label,
+} from "@heroui/react";
+import toast, { Toaster } from "react-hot-toast";
+import { LuClipboardCheck, LuClipboardCopy, LuShieldCheck, LuTrash } from "react-icons/lu";
+
+import {
+  updateUser, deleteUser, requestEmailUpdate, updateEmail, selectUser, get2faAppCode, verify2faApp, get2faMethods, remove2faMethod
+} from "../../slices/user";
+import { useTheme } from "../../modules/ThemeContext";
+import { useNavigate } from "react-router";
+import { useDispatch, useSelector } from "react-redux";
+import { ButtonSpinner } from "../../components/ButtonSpinner";
+
+/*
+  User Profile Settings main screen
+*/
+function ManageUser() {
+  const [user, setUser] = useState({ name: "" });
+  const [userEmail, setUserEmail] = useState("");
+  const [submitError, setSubmitError] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [success, setSuccess] = useState(false);
+  const [successEmail, setSuccessEmail] = useState(false);
+  const [updateEmailToken, setUpdateEmailToken] = useState("");
+  const [openDeleteModal, setOpenDeleteModal] = useState(false);
+  const [deleteUserError, setDeleteUserError] = useState(false);
+  const [qrCode, setQrCode] = useState("");
+  const [appToken, setAppToken] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading2fa, setLoading2fa] = useState(false);
+  const [backupCodes, setBackupCodes] = useState(null);
+  const [removeMethod, setRemoveMethod] = useState(null);
+  const [removePassword, setRemovePassword] = useState("");
+  const [removeLoading, setRemoveLoading] = useState(false);
+  const [codesCopied, setCodesCopied] = useState(false);
+  const [confirmationText, setConfirmationText] = useState("");
+
+  const userProp = useSelector(selectUser);
+  const authMethods = useSelector((state) => state.user.auths);
+
+  const { isDark } = useTheme();
+  const navigate = useNavigate();
+  const dispatch = useDispatch();
+
+  useEffect(() => {
+    const params = new URLSearchParams(document.location.search);
+    if (params.get("email")) {
+      setUpdateEmailToken(params.get("email"));
+    }
+  });
+
+  useEffect(() => {
+    if (userProp.name && !user.name) {
+      loadData();
+    }
+
+    if (userProp.email) setUserEmail(userProp.email);
+
+    if (userProp.id) dispatch(get2faMethods(userProp.id));
+  }, [userProp, user]);
+
+  const loadData = () => {
+    if (!userProp && !userProp.name) return;
+
+    setLoading(false);
+    setUser({ name: userProp.name });
+  };
+
+  const _onUpdateUser = () => {
+    setSubmitError(false);
+    setLoading(true);
+    setSuccess(false);
+    dispatch(updateUser({ user_id: userProp.id, data: user }))
+      .then(() => {
+        setSuccess(true);
+        setLoading(false);
+        toast.success("Your account has been updated.");
+      })
+      .catch(() => {
+        setSubmitError(true);
+        setLoading(false);
+      });
+  };
+
+  const _onUpdateEmail = () => {
+    setLoading(true);
+    setSuccessEmail(false);
+    dispatch(requestEmailUpdate({ user_id: userProp.id, email: userEmail }))
+      .then(() => {
+        setSuccessEmail(true);
+        setLoading(false);
+        toast.success("You will receive a confirmation on your new email shortly.");
+      })
+      .catch(() => {
+        toast.error("Error updating your email. Please try again or check if the email is correct.");
+        setLoading(false);
+      });
+  };
+
+  const _onUpdateEmailConfirm = () => {
+    setLoading(true);
+    setSuccessEmail(false);
+    dispatch(updateEmail({ user_id: userProp.id, token: updateEmailToken }))
+      .then((res) => {
+        if (res?.error) {
+          toast.error("Error updating your email. Please try again or check if the email is correct.");
+          setUpdateEmailToken("");
+          setLoading(false);
+          return;
+        }
+
+        setSuccessEmail(true);
+        setLoading(false);
+        toast.success("Your email has been updated.");
+        setUpdateEmailToken("");
+        navigate("/user/profile");
+        setTimeout(() => {
+          window.location.reload();
+        }, 1500);
+      })
+      .catch(() => {
+        toast.error("Error updating your email. Please try again or check if the email is correct.");
+        setUpdateEmailToken("");
+        setLoading(false);
+      });
+  };
+
+  const _onDeleteUser = () => {
+    setLoading(true);
+    dispatch(deleteUser(userProp.id))
+      .then(() => {
+        navigate("/feedback");
+      })
+      .catch(() => {
+        setLoading(false);
+        setDeleteUserError(true);
+        setOpenDeleteModal(false);
+      });
+  };
+
+  const _onSetup2FA = () => {
+    dispatch(get2faAppCode(userProp.id))
+      .then((res) => {
+        if (res.payload.qrUrl) {
+          setQrCode(res.payload.qrUrl);
+        }
+      });
+  };
+
+  const _onVerify2FA = () => {
+    setLoading2fa(true);
+    dispatch(verify2faApp({ user_id: userProp.id, token: appToken, password }))
+      .then((res) => {
+        if (res.error) {
+          toast.error("Error enabling 2FA. Please try again.");
+          setLoading2fa(false);
+          return;
+        }
+
+        toast.success("2FA has been enabled.");
+        setQrCode("");
+        setAppToken("");
+        setPassword("");
+        if (res?.payload?.backupCodes) {
+          setBackupCodes(res.payload.backupCodes);
+        }
+        setLoading2fa(false);
+
+        dispatch(get2faMethods(userProp.id));
+      })
+      .catch(() => {
+        toast.error("Error enabling 2FA. Please try again.");
+      });
+  };
+
+  const _onRemove2fa = () => {
+    setRemoveLoading(true);
+    dispatch(remove2faMethod({
+      user_id: userProp.id,
+      method_id: removeMethod,
+      password: removePassword,
+    }))
+      .then((res) => {
+        if (res?.error) {
+          setRemoveLoading(false);
+          toast.error("Could not remove. Please check if your password is correct.")
+          return;
+        }
+
+        setRemoveLoading(false);
+        setRemoveMethod(null);
+      });
+  };
+
+  const _onCopyCodes = () => {
+    window.navigator.clipboard.writeText(backupCodes.join("\n"));
+    setCodesCopied(true);
+    setTimeout(() => {
+      setCodesCopied(false);
+    }, 2000);
+  };
+
+  if (!user.name) {
+    return (
+      <div>
+        <ProgressCircle aria-label="Loading" size="lg" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col bg-surface p-4 rounded-3xl border border-divider">
+      <div className="text-lg font-semibold font-tw">Profile settings</div>
+      <div className="text-sm text-gray-500">Manage your profile settings</div>
+      <div className="h-4" />
+      <TextField name="name" isInvalid={Boolean(submitError)} className="max-w-md">
+        <Label>Name</Label>
+        <Input
+          placeholder="Enter your name"
+          fullWidth
+          value={user.name || ""}
+          onChange={(e) => setUser({ ...user, name: e.target.value })}
+          variant="secondary"
+          required
+        />
+      </TextField>
+      <div className="h-2" />
+      {submitError && (
+        <>
+          <Alert status="danger">
+            <Alert.Indicator />
+            <Alert.Content>
+              <Alert.Title>There was an error updating your account</Alert.Title>
+              <Alert.Description>Please try saving again.</Alert.Description>
+            </Alert.Content>
+          </Alert>
+          <div className="h-4" />
+        </>
+      )}
+      <div>
+        <Button
+          isDisabled={!user.name}
+          isPending={loading} onPress={_onUpdateUser}
+          variant={success ? "tertiary" : "primary"}
+        >
+          {loading ? <ButtonSpinner /> : null}
+          {success ? "Saved" : "Save" }
+        </Button>
+      </div>
+
+      <div className="h-4" />
+      <Separator />
+      <div className="h-4" />
+
+      <TextField name="email" isInvalid={Boolean(submitError)} className="max-w-md">
+        <Label>Your email</Label>
+        <Input
+          placeholder="Enter your email"
+          fullWidth
+          value={userEmail || ""}
+          onChange={(e) => setUserEmail(e.target.value)}
+          variant="secondary"
+          required
+          description={userEmail ? userEmail : ""}
+        />
+      </TextField>
+      {userEmail !== userProp.email && (
+        <>
+          <div className="h-2" />
+          <Alert status="info">
+            <Alert.Indicator />
+            <Alert.Content>
+              <Alert.Title>We will send you an email to confirm your new email address.</Alert.Title>
+              <Alert.Description>Please check your email for the confirmation link.</Alert.Description>
+            </Alert.Content>
+          </Alert>
+        </>
+      )}
+      <div className="h-4" />
+      <div>
+        <Button
+          isDisabled={!userEmail || userEmail === userProp.email}
+          isPending={loading} onPress={_onUpdateEmail}
+          variant={successEmail ? "tertiary" : "primary"}
+          size="sm"
+        >
+          {loading ? <ButtonSpinner /> : null}
+          {successEmail ? "We sent you an email" : "Update email" }
+        </Button>
+      </div>
+
+      <div className="h-4" />
+      <Separator />
+      <div className="h-4" />
+
+      <div className="text-lg font-semibold font-tw">Two-factor authentication</div>
+      <div className="h-2" />
+
+      {!qrCode && authMethods?.length === 0 && (
+        <div>
+          <Button onPress={() => _onSetup2FA()}
+          >
+            {"Enable 2FA"}
+            <LuShieldCheck />
+          </Button>
+        </div>
+      )}
+
+      {qrCode && (
+        <div className="flex flex-col gap-2">
+          <div>{"1. Have an authenticator app for mobile or browser ready"}</div>
+          <div>{"2. Scan the QR code with the authenticator app"}</div>
+          <img src={qrCode} alt="QR code" width={200} />
+          <div>{"3. Enter the code from the authenticator app below"}</div>
+          <Input
+            label="Code"
+            placeholder="Enter the code here"
+            variant="secondary"
+            fullWidth
+            onChange={(e) => setAppToken(e.target.value)}
+            className="max-w-md"
+          />
+          <div>{"4. Enter your account password to confirm"}</div>
+          <Input
+            label="Password"
+            placeholder="Enter your password"
+            variant="secondary"
+            fullWidth
+            type="password"
+            onChange={(e) => setPassword(e.target.value)}
+            className="max-w-md"
+          />
+
+          <div>
+            <Button onPress={() => _onVerify2FA()}
+              isDisabled={!appToken || !password}
+              isPending={loading2fa}
+            >
+              {loading2fa ? <ButtonSpinner /> : null}
+              {"Confirm"}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {backupCodes && (
+        <>
+          <div>{"Save these backup codes in a safe place as we only show them once. You can use them to access your account if you lose access to your authenticator app."}</div>
+          <div className="h-2" />
+          <div className="flex flex-row flex-wrap gap-1">
+            {backupCodes?.map((code) => (
+              <Chip key={code} variant="soft" className="rounded-sm">
+                {code}
+              </Chip>
+            ))}
+          </div>
+          <div className="h-2" />
+          <div>
+            <Button
+              variant="secondary"
+              onPress={_onCopyCodes}
+            >
+              {codesCopied ? "Copied" : "Copy codes"}
+              {codesCopied ? <LuClipboardCheck /> : <LuClipboardCopy />}
+            </Button>
+          </div>
+          <div className="h-2" />
+        </>
+      )}
+
+      {authMethods?.length > 0 && (
+        <Table>
+          <Table.ScrollContainer>
+            <Table.Content aria-label="Two-factor authentication methods" className="min-w-full">
+              <Table.Header>
+                <Table.Column id="method" className="text-center" textValue="Method">Method</Table.Column>
+                <Table.Column id="isEnabled" className="text-center" textValue="Enabled">Enabled</Table.Column>
+                <Table.Column id="actions" className="text-end">
+                  <span className="sr-only">Actions</span>
+                </Table.Column>
+              </Table.Header>
+              <Table.Body>
+                {authMethods.map((method) => (
+                  <Table.Row key={method.id} id={String(method.id)}>
+                    <Table.Cell>{method.method}</Table.Cell>
+                    <Table.Cell>
+                      {method.isEnabled
+                        ? <Chip size="sm" variant="soft">Yes</Chip>
+                        : <Chip size="sm" variant="soft">No</Chip>
+                      }
+                    </Table.Cell>
+                    <Table.Cell className="flex justify-end text-end">
+                      <Button variant="ghost"
+                        isIconOnly
+                        onPress={() => setRemoveMethod(method.id)}
+                      >
+                        <LuTrash />
+                      </Button>
+                    </Table.Cell>
+                  </Table.Row>
+                ))}
+              </Table.Body>
+            </Table.Content>
+          </Table.ScrollContainer>
+        </Table>
+      )}
+
+      <div className="h-4" />
+      <Separator />
+      <div className="h-4" />
+
+      <div>
+        <Button
+          variant="danger"
+          onPress={() => setOpenDeleteModal(true)}
+        >
+          Delete account
+          <LuTrash />
+        </Button>
+      </div>
+
+      <div className="h-4" />
+
+      <Modal>
+        <Modal.Backdrop variant="blur" isOpen={openDeleteModal} onOpenChange={setOpenDeleteModal}>
+          <Modal.Container>
+            <Modal.Dialog className="sm:max-w-xl">
+              <Modal.Header>
+                <Modal.Heading className="text-lg font-semibold font-tw">
+                  Delete Account
+                </Modal.Heading>
+              </Modal.Header>
+              <Modal.Body className="flex flex-col gap-2 p-1">
+                <div>{"This action will delete your account permanently, including your team and everything associated with it (projects, connections, and charts)."}</div>
+                <div>{"We cannot reverse this action as all the content is deleted immediately."}</div>
+                <div>{"We recommend you to transfer the ownership of your team to another user before deleting your account."}</div>
+                <div className="h-2" />
+                <div className="flex flex-col gap-1">
+                  <Input
+                    label="Confirm your email"
+                    placeholder={`Enter ${userProp.email} to confirm`}
+                    variant="secondary"
+                    onChange={(e) => setConfirmationText(e.target.value)}
+                    fullWidth
+                    description={confirmationText ? userProp.email : ""}
+                  />
+                </div>
+              </Modal.Body>
+              <Modal.Footer>
+                <Button
+                  slot="close"
+                  variant="secondary"
+                >
+                  {"Go back"}
+                </Button>
+                <Button
+                  variant="danger"
+                  onPress={_onDeleteUser}
+                  isPending={loading}
+                  isDisabled={confirmationText !== userProp.email}
+                >
+                  {"Delete forever"}
+                </Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+
+      <Modal>
+        <Modal.Backdrop isOpen={!!updateEmailToken} onOpenChange={(nextOpen) => { if (!nextOpen) setUpdateEmailToken(""); }}>
+          <Modal.Container>
+            <Modal.Dialog>
+              <Modal.Header>
+                <Modal.Heading className="text-lg font-semibold font-tw">
+                  Update email
+                </Modal.Heading>
+              </Modal.Header>
+              <Modal.Body>
+                <div>Are you sure you want to update your email?</div>
+              </Modal.Body>
+              <Modal.Footer>
+                <Button
+                  slot="close"
+                  variant="secondary"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="primary"
+                  onPress={_onUpdateEmailConfirm}
+                >
+                  Confirm
+                </Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+
+      {deleteUserError && (
+        <div>
+          <Alert status="danger">
+            <Alert.Indicator />
+            <Alert.Content>
+              <Alert.Title>Something went wrong while deleting your account</Alert.Title>
+              <Alert.Description>Please try refreshing the page.</Alert.Description>
+            </Alert.Content>
+          </Alert>
+        </div>
+      )}
+
+      <Modal>
+        <Modal.Backdrop isOpen={!!removeMethod} onOpenChange={(nextOpen) => { if (!nextOpen) setRemoveMethod(null); }}>
+          <Modal.Container>
+            <Modal.Dialog>
+              <Modal.Header>
+                <Modal.Heading className="text-lg font-semibold font-tw">
+                  Remove 2FA method
+                </Modal.Heading>
+              </Modal.Header>
+              <Modal.Body className="flex flex-col gap-2 p-1">
+                <div>Are you sure you want to remove your 2FA method? You can add a new one afterwards.</div>
+                <div>To proceed with the deletion, please confirm your Chartbrew password.</div>
+                <Input
+                  label="Password"
+                  placeholder="Enter your password"
+                  variant="secondary"
+                  onChange={(e) => setRemovePassword(e.target.value)}
+                  fullWidth
+                  type="password"
+                />
+              </Modal.Body>
+              <Modal.Footer>
+                <Button
+                  slot="close"
+                  variant="tertiary"
+                  size="sm"
+                >
+                  Close
+                </Button>
+                <Button
+                  variant="danger"
+                  isDisabled={!removePassword}
+                  onPress={_onRemove2fa}
+                  isPending={removeLoading}
+                  size="sm"
+                >
+                  Remove 2FA
+                </Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+
+      <Toaster
+        position="top-center"
+        reverseOrder={false}
+        toastOptions={{
+          duration: 2500,
+          style: {
+            borderRadius: "8px",
+            background: isDark ? "#333" : "#fff",
+            color: isDark ? "#fff" : "#000",
+          },
+        }}
+      />
+    </div>
+  );
+}
+
+export default ManageUser;

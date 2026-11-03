@@ -1,0 +1,165 @@
+// set up the encryption keys first, then load .env file
+const setUpEncryptionKeys = require("./modules/setUpEncryptionKeys"); // eslint-disable-line
+
+setUpEncryptionKeys();
+
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+
+const express = require("express");
+const methodOverride = require("method-override");
+const { urlencoded, json } = require("body-parser");
+const cookieParser = require("cookie-parser");
+const cors = require("cors");
+const _ = require("lodash");
+const morgan = require("morgan");
+const helmet = require("helmet");
+const fs = require("fs");
+const busboy = require("connect-busboy");
+
+const settings = process.env.NODE_ENV === "production" ? require("./settings") : require("./settings-dev");
+const routes = require("./api");
+const appsRoutes = require("./apps");
+
+const cleanChartCache = require("./modules/CleanChartCache");
+const cleanAuthCache = require("./modules/CleanAuthCache");
+const parseQueryParams = require("./middlewares/parseQueryParams");
+const db = require("./models/models");
+const packageJson = require("./package.json");
+const cleanGhostChartsCron = require("./modules/cleanGhostChartsCron");
+const updateAuditRetention = require("./modules/updateAuditRetention");
+const { checkEncryptionKeys } = require("./modules/cbCrypto");
+const { setUpQueues } = require("./setUpQueues");
+const socketManager = require("./modules/socketManager");
+
+const uploadsDirectory = path.resolve(__dirname, "uploads");
+const legacyUploadsDirectory = path.resolve(process.cwd(), "uploads");
+
+const setUploadHeaders = (res) => {
+  // Uploaded assets should never be script-executable even if a bad file slips through.
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'none'; script-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; img-src 'self' data:;"
+  );
+};
+
+// check if the encryption keys are valid 32-byte hex strings
+checkEncryptionKeys();
+
+// set up folders
+fs.mkdir(".cache", () => { });
+fs.mkdir(uploadsDirectory, { recursive: true }, () => { });
+fs.mkdir(path.join(uploadsDirectory, "snapshots"), { recursive: true }, () => { });
+
+const app = express();
+app.settings = settings;
+
+app.set("trust proxy", 1);
+
+app.use(busboy());
+if (process.env.NODE_ENV !== "production") {
+  app.set("trust proxy", true);
+  app.use(morgan("dev"));
+}
+app.use(cookieParser());
+app.use(urlencoded({
+  extended: true,
+  verify: (req, res, buf, encoding) => {
+    const url = req.originalUrl;
+    // Save raw body for Slack signature verification (URL-encoded requests)
+    if (req.headers["content-type"]?.includes("application/x-www-form-urlencoded") && url.includes("/apps/slack/")) {
+      req.rawBody = buf.toString(encoding || "utf8");
+    }
+  },
+}));
+app.set("query parser", "simple");
+app.use(json({
+  verify: (req, res, buf, encoding) => {
+    // Save raw body for Slack signature verification (JSON requests)
+    if (req.headers["content-type"]?.includes("application/json")) {
+      req.rawBody = buf.toString(encoding || "utf8");
+    }
+  },
+}));
+app.use(methodOverride("X-HTTP-Method-Override"));
+app.use(helmet({
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: false,
+}));
+// app.use(helmet.crossOriginResourcePolicy({ policy: "cross-origin" }));
+app.use(cors());
+//---------------------------------------
+
+app.get("/", (req, res) => {
+  return res.send("Welcome to chartBrew server API");
+});
+
+app.use("/uploads", express.static(uploadsDirectory, {
+  setHeaders: setUploadHeaders,
+}));
+
+// Backwards-compatible fallback for files previously written relative to process.cwd().
+if (legacyUploadsDirectory !== uploadsDirectory) {
+  app.use("/uploads", express.static(legacyUploadsDirectory, {
+    setHeaders: setUploadHeaders,
+  }));
+}
+
+// load middlewares
+app.use(parseQueryParams);
+
+// Load the routes
+_.each(routes, (controller, route) => {
+  app.use(route, controller(app));
+});
+
+// Load the apps routes
+_.each(appsRoutes, (controller, route) => {
+  app.use(route, controller(app));
+});
+
+const port = process.env.PORT || app.settings.port || 4019;
+
+db.migrate()
+  .then(async (data) => {
+    if (data && data.length > 0) {
+      console.info("Updated database schema to the latest version!"); // eslint-disable-line
+    }
+
+    // create an instance ID and record the current version
+    try {
+      const appData = await db.App.findAll();
+      if (!appData || appData.length === 0) {
+        db.App.create({ version: packageJson.version });
+      } else if (appData && appData[0]) {
+        db.App.update({ version: packageJson.version }, { where: { id: appData[0].id } });
+      }
+    } catch (e) {
+      // continue
+    }
+
+    const server = app.listen(port, app.settings.api, async () => {
+      // Initialize Socket.IO
+      await socketManager.initialize(server);
+
+      // Check if this is the main cluster and run the cron jobs if it is
+      const isMainCluster = parseInt(process.env.NODE_APP_INSTANCE, 10) === 0;
+      if (isMainCluster || !process.env.NODE_APP_INSTANCE) {
+        // start CronJob, making sure the database is populated for the first time
+        setTimeout(() => {
+          setUpQueues(app);
+          cleanChartCache();
+          cleanAuthCache();
+          cleanGhostChartsCron();
+          updateAuditRetention();
+        }, 5000);
+      }
+
+      console.log(`Running server on port ${port}`); // eslint-disable-line
+    });
+  })
+  .catch((err) => {
+    console.error(err); // eslint-disable-line
+    console.error("Migrations failed, could not run the server app."); // eslint-disable-line
+  });

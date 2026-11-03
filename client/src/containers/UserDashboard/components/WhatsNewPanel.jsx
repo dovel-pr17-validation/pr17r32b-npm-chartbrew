@@ -1,0 +1,321 @@
+import {
+  Button,
+  Card,
+  Chip,
+  Separator,
+} from "@heroui/react";
+import PropTypes from "prop-types";
+import React from "react";
+import { LuChevronRight, LuExternalLink, LuX } from "react-icons/lu";
+import { useNavigate } from "react-router";
+import { useDispatch } from "react-redux";
+
+import { cn } from "../../../modules/utils";
+import { toggleAiModal } from "../../../slices/ui";
+import {
+  getIconComponent,
+  getTone,
+} from "./whatsNewPanelUtils";
+
+const panelGlassSurfaceClassName = "relative overflow-hidden rounded-[28px] border border-white/50 bg-surface/72 shadow-[0_26px_60px_-42px_rgba(4,139,222,0.55)] backdrop-blur-2xl backdrop-saturate-150 dark:border-white/10 dark:bg-surface/80 dark:shadow-[0_26px_80px_-42px_rgba(4,139,222,0.35)]";
+const itemGlassSurfaceClassName = "relative overflow-hidden rounded-[24px] border bg-surface/58 shadow-none backdrop-blur-xl backdrop-saturate-150 dark:bg-surface/58";
+const itemGlassOverlayClassName = "pointer-events-none absolute inset-0 rounded-[inherit] bg-linear-to-br from-white/55 via-white/8 to-transparent dark:from-white/8 dark:via-white/[0.04] dark:to-transparent";
+const separatorClassName = "bg-white/55 dark:bg-white/8";
+
+function getWhatsNewContent({ navigate, dispatch }) {
+  return {
+    groups: [
+      {
+        key: "features",
+        title: "New features",
+        items: [
+          {
+            id: "slack-ai-integration",
+            type: "newFeature",
+            title: "Ask Chartbrew from Slack",
+            body: "Use Slack to ask Chartbrew questions and get instant insights.",
+            // badge: "New",
+            icon: "slack",
+            colorScheme: "primary",
+            ctaLabel: "Open integrations",
+            timestampLabel: "Just added",
+            action: {
+              label: "Open integrations",
+              onPress: () => navigate("/integrations"),
+            },
+          },
+          {
+            id: "ai-chart-builder",
+            type: "newFeature",
+            title: "AI chart builder",
+            body: "Describe the chart you want, Chartbrew creates the first draft.",
+            // badge: "New",
+            icon: "brain",
+            colorScheme: "primary",
+            ctaLabel: "Open AI assistant",
+            timestampLabel: "Just added",
+            action: {
+              label: "Open AI assistant",
+              onPress: () => dispatch(toggleAiModal()),
+            },
+          },
+        ],
+      },
+      // {
+      //   key: "releaseHighlights",
+      //   title: "Release highlights",
+      //   items: [
+      //   ],
+      // },
+      {
+        key: "underusedCapabilities",
+        title: "Underused capabilities",
+        items: [
+          {
+            id: "scheduled-reports",
+            type: "underusedCapability",
+            title: "Scheduled reports",
+            body: "Send chart snapshots automatically to your inbox.",
+            icon: "calendar",
+            colorScheme: "warning",
+            ctaLabel: "Read tutorial",
+            timestampLabel: "Often missed",
+            action: {
+              label: "Read tutorial",
+              onPress: () => window.open("https://chartbrew.com/blog/automated-dashboard-snapshots-in-chartbrew", "_blank"),
+              type: "external",
+            },
+          },
+        ],
+      },
+    ],
+    tip: {
+      id: "tip-variables",
+      type: "tip",
+      variant: "tip",
+      eyebrow: "Pro tip",
+      title: "Turn one dashboard into many views",
+      body: "Variables help you reuse the same charts across date ranges, filters, and segments.",
+      icon: "sparkles",
+      colorScheme: "tip",
+      ctaLabel: "Open variables guide",
+      action: {
+        label: "Open variables guide",
+        onPress: () => window.open("https://chartbrew.com/blog/how-to-use-variables-in-chartbrew", "_blank"),
+        type: "external",
+      },
+    },
+  };
+}
+
+function WhatsNewItemCard({ item, onAction }) {
+  const tone = getTone(item.colorScheme);
+  const Icon = getIconComponent(item.icon);
+  const actionLabel = item.ctaLabel || item.action?.label || "Open";
+  const isExternalAction = item.action?.type === "external";
+
+  if (item.variant === "tip") {
+    return (
+      <Card
+        className={cn(
+          itemGlassSurfaceClassName,
+          "border-white/45 shadow-[0_18px_48px_-36px_rgba(4,139,222,0.45)] dark:border-white/8",
+          tone.tipCard,
+        )}
+      >
+        <div className={itemGlassOverlayClassName} />
+        <div className="pointer-events-none absolute -right-8 top-0 h-28 w-28 rounded-full bg-secondary/18 blur-3xl dark:bg-secondary/12" />
+        <div className="pointer-events-none absolute bottom-0 left-0 h-24 w-24 rounded-full bg-primary/18 blur-3xl dark:bg-primary/18" />
+        <Card.Content className="relative z-10 gap-4">
+          <Card.Header>
+            {Icon && (
+              <div className={cn("mt-0.5 flex h-10 w-10 items-center justify-center rounded-full border border-white/50 shadow-sm dark:border-white/10", tone.icon)}>
+                <Icon size={18} />
+              </div>
+            )}
+            {item.eyebrow && (
+              <p className="text-xs mt-2 font-semibold uppercase tracking-[0.18em] text-foreground-400">
+                {item.eyebrow}
+              </p>
+            )}
+            <Card.Title className="text-lg mt-2 font-semibold leading-tight text-foreground">
+              {item.title}
+            </Card.Title>
+          </Card.Header>
+          <Card.Description>
+            <p className="text-sm leading-6 text-foreground-600">
+              {item.body}
+            </p>
+          </Card.Description>
+
+          {item.action && (
+            <Button
+              className={cn(
+                "font-medium backdrop-blur-md backdrop-saturate-150",
+                "border border-white/50 bg-white/55 dark:border-white/10 dark:bg-white/5",
+                tone.tipButton,
+              )}
+              onPress={() => onAction(item.action)} variant="tertiary"
+              fullWidth
+            >
+              {actionLabel}
+              {isExternalAction ? <LuExternalLink size={16} /> : <LuChevronRight size={16} />}
+            </Button>
+          )}
+        </Card.Content>
+      </Card>
+    );
+  }
+
+  return (
+    <Card
+      className={cn(
+        itemGlassSurfaceClassName,
+        "border-white/55 dark:border-white/8",
+        tone.card,
+      )}
+    >
+      <div className={itemGlassOverlayClassName} />
+      <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-linear-to-r from-transparent via-white/80 to-transparent dark:via-white/15" />
+      <Card.Content className="relative z-10">
+        {Icon && (
+          <div className={cn("rounded-full border border-white/50 p-2 max-w-10 shadow-sm dark:border-white/10", tone.icon)}>
+            <Icon size={24} className="pr-0.5" />
+          </div>
+        )}
+        <Card.Header>
+          {item.badge && (
+            <Chip size="sm" variant="soft" color={tone.badge}>
+              {item.badge}
+            </Chip>
+          )}
+          <Card.Title>
+            {item.title}
+          </Card.Title>
+          <Card.Description>
+            <p className="mt-2 text-sm leading-6 text-foreground-600">
+              {item.body}
+            </p>
+          </Card.Description>
+        </Card.Header>
+        <Card.Footer>
+          {(item.timestampLabel || item.action) && (
+            <div className="mt-3 flex flex-row items-center justify-between w-full">
+              <span className="text-xs text-foreground-400">
+                {item.timestampLabel}
+              </span>
+              {item.action && (
+                <Button
+                  size="sm"
+                  variant="tertiary"
+                  color={tone.badge}
+                  onPress={() => onAction(item.action)}
+                >
+                  {actionLabel}
+                  {isExternalAction ? <LuExternalLink size={14} /> : <LuChevronRight size={14} />}
+                </Button>
+              )}
+            </div>
+          )}
+        </Card.Footer>
+      </Card.Content>
+    </Card>
+  );
+}
+
+WhatsNewItemCard.propTypes = {
+  item: PropTypes.shape({
+    action: PropTypes.shape({
+      label: PropTypes.string,
+      onPress: PropTypes.func,
+      type: PropTypes.oneOf(["external"]),
+    }),
+    badge: PropTypes.string,
+    body: PropTypes.string.isRequired,
+    colorScheme: PropTypes.string,
+    ctaLabel: PropTypes.string,
+    eyebrow: PropTypes.string,
+    icon: PropTypes.string,
+    timestampLabel: PropTypes.string,
+    title: PropTypes.string.isRequired,
+    variant: PropTypes.oneOf(["tip"]),
+  }).isRequired,
+  onAction: PropTypes.func.isRequired,
+};
+
+function WhatsNewPanel({ onCollapse }) {
+  const navigate = useNavigate();
+  const dispatch = useDispatch();
+  const { groups, tip } = getWhatsNewContent({ navigate, dispatch });
+
+  const handleAction = (action) => {
+    action?.onPress?.();
+  };
+
+  if (groups.length < 1 && !tip) {
+    return null;
+  }
+
+  return (
+    <aside className="sticky top-[88px]">
+      <Card className={panelGlassSurfaceClassName}>
+        <div className="pointer-events-none absolute inset-0">
+          <div className="absolute -left-12 top-16 h-40 w-40 rounded-full bg-primary/22 blur-3xl dark:bg-primary/20" />
+          <div className="absolute right-0 top-0 h-32 w-32 rounded-full bg-secondary/20 blur-3xl dark:bg-secondary/16" />
+          <div className="absolute bottom-12 left-1/2 h-36 w-36 -translate-x-1/2 rounded-full bg-primary/14 blur-3xl dark:bg-primary/12" />
+          <div className="absolute inset-px rounded-[27px] bg-linear-to-b from-white/45 via-white/8 to-transparent dark:from-white/8 dark:via-white/2 dark:to-transparent" />
+          <div className="absolute inset-x-8 top-0 h-px bg-linear-to-r from-transparent via-white/85 to-transparent dark:via-white/15" />
+        </div>
+        <div className="absolute top-3 right-3 z-20">
+          <Button
+            isIconOnly
+            size="sm"
+            variant="tertiary"
+            onPress={onCollapse}
+            className="border border-white/55 bg-white/60 backdrop-blur-md dark:border-white/10 dark:bg-white/5"
+          >
+            <LuX size={16} />
+          </Button>
+        </div>
+        <Card.Header className="relative z-10 flex items-start justify-between gap-3 px-2 py-4">
+          <Card.Title className="text-xl font-semibold text-foreground">
+            Discover more
+          </Card.Title>
+          <Card.Description>
+            New features, tips, and shortcuts for Chartbrew.
+          </Card.Description>
+        </Card.Header>
+        <Card.Content className="relative z-10 flex flex-col gap-4 pb-4 pt-2">
+          {groups.map((group) => (
+            <section key={group.key} className="flex flex-col gap-3">
+              <div className="flex flex-col gap-3">
+                {group.items.map((item) => (
+                  <WhatsNewItemCard
+                    key={item.id}
+                    item={item}
+                    onAction={handleAction}
+                  />
+                ))}
+              </div>
+            </section>
+          ))}
+
+          {tip && (
+            <>
+              <Separator className={separatorClassName} />
+              <section className="flex flex-col gap-3">
+                <WhatsNewItemCard item={tip} onAction={handleAction} />
+              </section>
+            </>
+          )}
+        </Card.Content>
+      </Card>
+    </aside>
+  );
+}
+
+WhatsNewPanel.propTypes = {
+  onCollapse: PropTypes.func.isRequired,
+};
+
+export default WhatsNewPanel;

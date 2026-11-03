@@ -1,0 +1,1397 @@
+import React, { useState, useEffect, useRef } from "react";
+import PropTypes from "prop-types";
+import { useDispatch, useSelector } from "react-redux";
+import { Link, useNavigate, useParams } from "react-router";
+import {
+  Card, Tooltip, Dropdown, Button, Modal, Input, Link as LinkNext,
+  Popover, Chip, Select,
+  Badge,
+  Separator,
+  Kbd,
+  Label,
+  ListBox,
+  Spinner,
+} from "@heroui/react";
+import {
+  LuBell, LuCalendarClock, LuCheck, LuChevronDown, LuEllipsis, LuFileDown,
+  LuLayoutDashboard, LuListFilter, LuLock, LuLockOpen,
+  LuRefreshCw, LuSettings, LuShare, LuTrash, LuMonitor, LuMonitorX, LuX,
+  LuCircleCheck, LuVariable,
+  LuEllipsisVertical,
+} from "react-icons/lu";
+
+import moment from "moment";
+import _ from "lodash";
+import { motion } from "framer-motion";
+import toast from "react-hot-toast";
+
+import {
+  removeChart, runQuery, runQueryWithFilters, getChart, updateChart,
+} from "../../slices/chart";
+import canAccess from "../../config/canAccess";
+import LineChart from "./components/LineChart";
+import BarChart from "./components/BarChart";
+import RadarChart from "./components/RadarChart";
+import PolarChart from "./components/PolarChart";
+import DoughnutChart from "./components/DoughnutChart";
+import PieChart from "./components/PieChart";
+import MatrixChart from "./components/MatrixChart";
+import TableContainer from "./components/TableView/TableContainer";
+import ChartFilters from "./components/ChartFilters";
+import useInterval from "../../modules/useInterval";
+import Row from "../../components/Row";
+import Text from "../../components/Text";
+import KpiMode from "./components/KpiMode";
+import useChartSize from "../../modules/useChartSize";
+import DatasetAlerts from "../AddChart/components/DatasetAlerts";
+import isMac from "../../modules/isMac";
+import GaugeChart from "./components/GaugeChart";
+import { selectTeam } from "../../slices/team";
+import { selectUser } from "../../slices/user";
+import { exportChartToExcel, canExportChart } from "../../modules/exportChart";
+import ChartSharing from "./components/ChartSharing";
+import { getExposedChartFilters } from "../../modules/getChartDatasetConditions";
+import { buildChartRuntimeRequest, normalizeChartFilterCondition } from "../../modules/chartRuntimeFilters";
+
+const getFiltersFromStorage = (projectId) => {
+  try {
+    const filters = JSON.parse(window.localStorage.getItem("_cb_filters"));
+    return filters[projectId] || null;
+  } catch (e) {
+    return null;
+  }
+};
+
+/*
+  This is the container that generates the Charts together with the menu
+*/
+function Chart(props) {
+  const {
+    chart,
+    isPublic = false,
+    print = "",
+    height = 300,
+    showExport = false,
+    editingLayout = false,
+    onEditLayout = () => {},
+    dashboardFilters: externalDashboardFilters = null,
+    chartFilters: externalChartFilters = null,
+    onAddChartFilter = null,
+    onClearChartFilter = null,
+    onRefreshRuntimeChart = null,
+  } = props;
+
+  const team = useSelector(selectTeam);
+  const user = useSelector(selectUser);
+
+  const params = useParams();
+  const navigate = useNavigate();
+  const dispatch = useDispatch();
+
+  const [chartLoading, setChartLoading] = useState(false);
+  const [error, setError] = useState(false);
+  const [deleteModal, setDeleteModal] = useState(false);
+  const [publicModal, setPublicModal] = useState(false);
+  const [embedModal, setEmbedModal] = useState(false);
+  const [updateModal, setUpdateModal] = useState(false);
+  const [updateFrequency, setUpdateFrequency] = useState(false);
+  const [autoUpdateLoading, setAutoUpdateLoading] = useState(false);
+  const [publicLoading, setPublicLoading] = useState(false);
+  const [dashboardFilters, setDashboardFilters] = useState(
+    getFiltersFromStorage(params.projectId)
+  );
+  const [conditions, setConditions] = useState([]);
+  const [redraw, setRedraw] = useState(false);
+  const [updateFreqType, setUpdateFreqType] = useState("hours");
+  const [customUpdateFreq, setCustomUpdateFreq] = useState("");
+  const [autoUpdateError, setAutoUpdateError] = useState("");
+  const [exportLoading, setExportLoading] = useState(false);
+  const [alertsModal, setAlertsModal] = useState(false);
+  const [alertsDatasetId, setAlertsDatasetId] = useState(null);
+  const chartSize = useChartSize(chart.layout);
+  const [isCompact, setIsCompact] = useState(false);
+  const containerRef = useRef(null);
+  const isRuntimeManaged = typeof onRefreshRuntimeChart === "function";
+  const activeDashboardFilters = Array.isArray(externalDashboardFilters)
+    ? externalDashboardFilters
+    : (dashboardFilters || []);
+  const activeChartFilters = Array.isArray(externalChartFilters)
+    ? externalChartFilters
+    : conditions;
+  const runtimeRequest = buildChartRuntimeRequest({
+    chart,
+    dashboardFilters: activeDashboardFilters,
+    chartFilters: activeChartFilters,
+  });
+
+  useInterval(async () => {
+    if (isPublic && isRuntimeManaged) {
+      return;
+    }
+
+    if (isRuntimeManaged && runtimeRequest.hasRuntimeFilters) {
+      await onRefreshRuntimeChart(chart.id, { refresh: true });
+    } else if (!isRuntimeManaged) {
+      const currentFilters = params.projectId ? getFiltersFromStorage(params.projectId) : null;
+      const hasVariables = currentFilters && currentFilters.some((f) => f.type === "variable");
+
+      if ((currentFilters && currentFilters.length > 0) || hasVariables) {
+        await _runFiltering(currentFilters, params.projectId);
+        return;
+      }
+
+      await dispatch(getChart({
+        project_id: chart.project_id,
+        chart_id: chart.id,
+        password: isPublic ? window.localStorage.getItem("reportPassword") : null,
+        fromInterval: true
+      }));
+    } else {
+      await dispatch(getChart({
+        project_id: chart.project_id,
+        chart_id: chart.id,
+        password: isPublic ? window.localStorage.getItem("reportPassword") : null,
+        fromInterval: true
+      }));
+    }
+  }, !isPublic && chart.autoUpdate > 0 && chart.autoUpdate < 600 ? chart.autoUpdate * 1000 : 600000);
+
+  useEffect(() => {
+    if (Array.isArray(externalChartFilters)) {
+      setConditions(externalChartFilters);
+    }
+  }, [externalChartFilters]);
+
+  useEffect(() => {
+    if (Array.isArray(externalDashboardFilters)) {
+      setDashboardFilters(externalDashboardFilters);
+    }
+  }, [externalDashboardFilters]);
+
+  const _onGetChartData = () => {
+    if (isRuntimeManaged) {
+      onRefreshRuntimeChart(chart.id, { refresh: true });
+      return;
+    }
+
+    const { projectId } = params;
+
+    const filters = getFiltersFromStorage(projectId);
+
+    const unsortedVarFilters = filters?.filter((f) => f.type === "variable");
+    const variableFilters = {};
+    if (unsortedVarFilters?.length > 0) {
+      unsortedVarFilters.forEach((f) => {
+        if (f.variable && f.value) {
+          variableFilters[f.variable] = f.value;
+        }
+      });
+    }
+
+    const otherFilters = filters?.filter((f) => f.type !== "variable");
+
+    const applicableFilters = otherFilters?.filter((filter) => {
+      if (filter.type === "date" && filter.charts && Array.isArray(filter.charts)) {
+        return filter.charts.includes(chart.id);
+      }
+      return true;
+    });
+
+    setChartLoading(true);
+    dispatch(runQuery({
+      project_id: projectId,
+      chart_id: chart.id,
+      filters: applicableFilters,
+      variables: variableFilters,
+    }))
+      .then(() => {
+        setChartLoading(false);
+
+        setDashboardFilters(filters);
+        if (applicableFilters && applicableFilters.length > 0 && _chartHasFilter(applicableFilters)) {
+          _runFiltering(applicableFilters);
+        }
+      })
+      .catch((error) => {
+        if (error === 413) {
+          setChartLoading(false);
+        } else {
+          setChartLoading(false);
+          setError(true);
+        }
+      });
+  };
+ 
+  useEffect(() => {
+    if (customUpdateFreq && updateFreqType) {
+      if (updateFreqType === "days") {
+        setUpdateFrequency(customUpdateFreq * 3600 * 24);
+      } else if (updateFreqType === "hours") {
+        setUpdateFrequency(customUpdateFreq * 3600);
+      } else if (updateFreqType === "minutes") {
+        setUpdateFrequency(customUpdateFreq * 60);
+      } else if (updateFreqType === "seconds") {
+        setUpdateFrequency(customUpdateFreq);
+      }
+    }
+  }, [customUpdateFreq, updateFreqType]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (containerRef.current) {
+        setIsCompact(containerRef.current.offsetHeight < 200);
+      }
+    };
+
+    const resizeObserver = new ResizeObserver(handleResize);
+    if (containerRef.current) {
+      resizeObserver.observe(containerRef.current);
+    }
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, []);
+
+  const _runFiltering = async (filters, projectId = params.projectId) => {
+    if (!chart.ChartDatasetConfigs) return;
+
+    // If no filters are provided, get them from localStorage
+    const allFilters = filters || getFiltersFromStorage(projectId) || [];
+    
+    // Separate variable filters from other filters
+    const variableFilters = allFilters.filter((f) => f.type === "variable");
+    const otherFilters = allFilters.filter((f) => f.type !== "variable");
+
+    // Convert variable filters to the expected format { [variable_name]: variable_value }
+    const variables = {};
+    variableFilters.forEach((f) => {
+      if (f.variable && f.value) {
+        variables[f.variable] = f.value;
+      }
+    });
+
+    // Filter out date filters that don't apply to this chart
+    const applicableFilters = otherFilters.filter((filter) => {
+      if (filter.type === "date" && filter.charts && Array.isArray(filter.charts)) {
+        return filter.charts.includes(chart.id);
+      }
+      return true; // Keep all non-date filters
+    });
+
+    // Also re-run when clearing a previously applied runtime state.
+    if (applicableFilters.length > 0 || Object.keys(variables).length > 0 || chart.filterMetadata) {
+      await dispatch(runQueryWithFilters({
+        project_id: chart.project_id,
+        chart_id: chart.id,
+        filters: applicableFilters,
+        variables,
+      }));
+    }
+  };
+
+  const _onGetChart = () => {
+    dispatch(getChart({ project_id: params.projectId, chart_id: chart.id }));
+  };
+
+  const _onDeleteChartConfirmation = () => {
+    setDeleteModal(true);
+  };
+
+  const _onDeleteChart = () => {
+    setChartLoading(true);
+    dispatch(removeChart({ project_id: params.projectId, chart_id: chart.id }))
+      .then(() => {
+        setChartLoading(false);
+        setDeleteModal(false);
+      })
+      .catch(() => {
+        setChartLoading(false);
+        setError(true);
+        setDeleteModal(false);
+      });
+  };
+
+  const _onPublicConfirmation = () => {
+    if (chart.public) {
+      setTimeout(() => {
+        _onPublic(chart);
+      }, 100);
+    } else {
+      setPublicModal(true);
+    }
+  };
+
+  const _onPublic = () => {
+    setPublicModal(false);
+    setPublicLoading(true);
+
+    dispatch(updateChart({
+      project_id: params.projectId,
+      chart_id: chart.id,
+      data: { public: !chart.public },
+      justUpdates: true,
+    }))
+      .then(() => {
+        setChartLoading(false);
+        setPublicLoading(false);
+      })
+      .catch(() => {
+        setChartLoading(false);
+        setError(true);
+        setPublicLoading(false);
+      });
+  };
+
+  const _onChangeReport = () => {
+    setChartLoading(true);
+
+    dispatch(updateChart({
+      project_id: params.projectId,
+      chart_id: chart.id,
+      data: { onReport: !chart.onReport },
+    }))
+      .then(() => {
+        setChartLoading(false);
+      })
+      .catch(() => {
+        setChartLoading(false);
+        setError(true);
+      });
+  };
+
+  const _onEmbed = () => {
+    setEmbedModal(true);
+  };
+
+  const _openUpdateModal = () => {
+    setUpdateModal(true);
+    setUpdateFrequency(chart.autoUpdate);
+  };
+
+  const _openAlertsModal = () => {
+    setAlertsModal(true);
+    setAlertsDatasetId(chart?.ChartDatasetConfigs?.[0]?.id);
+  };
+
+  const _getUpdateFreqText = (value) => {
+    let text = "Update schedule";
+
+    if (value === 60) text = "minute";
+    else if (value === 300) text = "5 minutes";
+    else if (value === 900) text = "15 minutes";
+    else if (value === 1800) text = "30 minutes";
+    else if (value === 3600) text = "1 hour";
+    else if (value === 10800) text = "3 hours";
+    else if (value === 21600) text = "6 hours";
+    else if (value === 43200) text = "12 hours";
+    else if (value === 86400) text = "day";
+    else if (value === 604800) text = "week";
+    else if (value === 2592000) text = "month";
+    else if (value < 120 && value > 0) text = `${value} seconds`;
+    else if (value > 119 && value < 3600) {
+      text = `${Math.floor(value / 60)} minutes`;
+    } else if (value > 3600 && value < 86400) {
+      text = `${Math.floor(value / 3600)} hours`;
+    } else if (value > 86400 && value < 604800) {
+      text = `${Math.floor(value / 86400)} days`;
+    }
+
+    return text;
+  };
+
+  const _onChangeAutoUpdate = (frequency = updateFrequency) => {
+    if (updateFreqType === "seconds" && frequency < 10 && frequency > 0) {
+      setAutoUpdateError("Invalid update frequency");
+      return;
+    }
+
+    setAutoUpdateLoading(true);
+    dispatch(updateChart({
+      project_id: params.projectId,
+      chart_id: chart.id,
+      data: { autoUpdate: frequency },
+      justUpdates: true,
+    }))
+      .then(() => {
+        setAutoUpdateLoading(false);
+        setUpdateModal(false);
+      })
+      .catch(() => {
+        setAutoUpdateLoading(false);
+        setError(true);
+        setUpdateModal(false);
+      });
+  };
+
+  const _chartHasFilter = (dashFilters = activeDashboardFilters) => {
+    let found = false;
+    if (chart.ChartDatasetConfigs) {
+      chart.ChartDatasetConfigs.forEach((cdConfig) => {
+        if (cdConfig.Dataset?.fieldsSchema) {
+          Object.keys(cdConfig.Dataset.fieldsSchema).forEach((key) => {
+            if (_.find(dashFilters, (o) => o.field === key)) {
+              found = true;
+            }
+          });
+        }
+      });
+    }
+
+    // Also check for date filters that apply to this specific chart
+    if (dashFilters && Array.isArray(dashFilters)) {
+      dashFilters.forEach((filter) => {
+        if (filter.type === "date" && filter.charts && Array.isArray(filter.charts)) {
+          if (filter.charts.includes(chart.id)) {
+            found = true;
+          }
+        }
+      });
+    }
+
+    return found;
+  };
+
+  const _checkIfFilters = () => {
+    return getExposedChartFilters(chart).length > 0;
+  };
+
+  const _canAccess = (role) => {
+    return canAccess(role, user.id, team.TeamRoles);
+  };
+
+  const _onExport = () => {
+    setExportLoading(true);
+    
+    try {
+      // Check if chart can be exported
+      if (!canExportChart(chart)) {
+        toast.error("This chart cannot be exported - no data available");
+        setExportLoading(false);
+        return;
+      }
+
+      // Use client-side export with the already filtered data
+      exportChartToExcel(chart);
+      toast.success("Chart exported successfully");
+      setExportLoading(false);
+    } catch (error) {
+      console.error("Export error:", error);
+      toast.error(error.message || "Failed to export chart");
+      setExportLoading(false);
+    }
+  };
+
+  const _onPublicExport = (chart) => {
+    setExportLoading(true);
+    
+    try {
+      // Check if chart can be exported
+      if (!canExportChart(chart)) {
+        toast.error("This chart cannot be exported - no data available");
+        setExportLoading(false);
+        return;
+      }
+
+      // Use client-side export with the already filtered data
+      exportChartToExcel(chart);
+      toast.success("Chart exported successfully");
+      setExportLoading(false);
+    } catch (error) {
+      console.error("Export error:", error);
+      toast.error(error.message || "Failed to export chart");
+      setExportLoading(false);
+    }
+  };
+
+  const _getUpdatedTime = (chart) => {
+    if (moment().diff(moment(chart.chartDataUpdated), "days") > 1) {
+      return moment(chart.chartDataUpdated).calendar();
+    }
+
+    return moment(chart.chartDataUpdated).fromNow();
+  };
+
+  const _onAddFilter = (condition) => {
+    const normalizedCondition = normalizeChartFilterCondition(condition);
+    if (!normalizedCondition) return;
+
+    let found = false;
+    const newConditions = activeChartFilters.map((c) => {
+      let newCondition = c;
+      if (c.id === normalizedCondition.id) {
+        newCondition = normalizedCondition;
+        found = true;
+      }
+      return newCondition;
+    });
+    if (!found) newConditions.push(normalizedCondition);
+
+    if (isRuntimeManaged && typeof onAddChartFilter === "function") {
+      onAddChartFilter(chart.id, newConditions);
+      return;
+    }
+
+    setConditions(newConditions);
+    _runFiltering(newConditions);
+  };
+
+  const _onClearFilter = (condition) => {
+    const newConditions = [...activeChartFilters];
+    const clearIndex = _.findIndex(newConditions, { id: condition.id });
+    if (clearIndex > -1) newConditions.splice(clearIndex, 1);
+
+    if (isRuntimeManaged && typeof onClearChartFilter === "function") {
+      onClearChartFilter(chart.id, newConditions);
+      return;
+    }
+
+    setConditions(newConditions);
+    _runFiltering(newConditions);
+  };
+
+  const _onPublishChart = async () => {
+    const res = await dispatch(updateChart({
+      project_id: params.projectId,
+      chart_id: chart.id,
+      data: { draft: false },
+    }));
+
+    if (res.error) {
+      toast.error("There was a problem publishing your chart");
+    } else {
+      toast.success("Chart published successfully");
+    }
+  };
+
+  const _onGetVariables = () => {
+    const cdcs = chart.ChartDatasetConfigs;
+    const variables = [];
+    cdcs.forEach((cdc) => {
+      if (cdc?.configuration?.variables) {
+        variables.push(...cdc.configuration.variables);
+      }
+    });
+
+    return variables;
+  };
+
+  const { projectId } = params;
+
+  return (
+    <motion.div
+      animate={{ opacity: [0, 1] }}
+      transition={{ duration: 0.7 }}
+      style={styles.container}
+      ref={containerRef}
+    >
+      {error && (
+        <Text color="danger" onClick={() => setError(false)}>
+          {"There was a problem with your request. Please refresh the page and try again."}
+        </Text>
+      )}
+      {chart && (
+        <Card
+          className={`h-full bg-surface border-solid border border-divider shadow-none ${print && "min-h-[350px] border-solid border border-content4"}`}
+        >
+          <Card.Header className={`pb-0 flex flex-row justify-between items-start ${isCompact ? "h-0 p-0 overflow-hidden" : ""}`}>
+            <div className={`flex items-start justify-start ${isCompact ? "hidden" : ""}`}>
+              <div>
+                <Row align="center" className={"flex-wrap gap-1"}>
+                  {chart.draft && (
+                    <Chip variant="secondary" size="sm" className="rounded-sm">Draft</Chip>
+                  )}
+                  <>
+                    {_canAccess("projectEditor") && !editingLayout && (
+                      <Link to={`/dashboard/${params.projectId}/chart/${chart.id}/edit`}>
+                        <div className={"text-foreground font-bold text-sm"}>{chart.name}</div>
+                      </Link>
+                    )}
+                    {(!_canAccess("projectEditor") || editingLayout) && (
+                      <Text b>{chart.name}</Text>
+                    )}
+                  </>
+                </Row>
+                {chart.chartData && (
+                  <Row justify="flex-start" align="center" className={"gap-1"}>
+                    {!chartLoading && !chart.loading && (
+                      <>
+                        <span className="text-[10px] text-default-500" title="Last updated">{`${_getUpdatedTime(chart)}`}</span>
+                      </>
+                    )}
+                    {(chartLoading || chart.loading) && (
+                      <>
+                        <Spinner size="sm" color="default" aria-label="Updating chart" />
+                        <span className="text-[10px] text-default-500">{"Updating..."}</span>
+                      </>
+                    )}
+                    {chart.autoUpdate > 0 && (
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div>
+                            <LuCalendarClock size={12} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>
+                          {`Updates every ${_getUpdateFreqText(chart.autoUpdate)}`}
+                        </Tooltip.Content>
+                      </Tooltip>
+                    )}
+                    {chart.public && !isPublic && !print && (
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div>
+                            <LuLockOpen size={12} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>This chart is public</Tooltip.Content>
+                      </Tooltip>
+                    )}
+                    {(chart.onReport && !isPublic && !print && !chart.draft) && (
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div>
+                            <LuMonitor size={12} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Visible on your report and snapshots</Tooltip.Content>
+                      </Tooltip>
+                    )}
+                    {(!chart.onReport || chart.draft) && (
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div>
+                            <LuMonitorX size={12} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>
+                          {chart.draft ? "Drafts are not visible on report and snapshots" : "Hidden on reports and snapshots"}
+                        </Tooltip.Content>
+                      </Tooltip>
+                    )}
+                    {chart?.Alerts?.length > 0 && (
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div className="hover:text-accent cursor-pointer" onClick={_openAlertsModal}>
+                            <LuBell size={12} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>This chart has alerts</Tooltip.Content>
+                      </Tooltip>
+                    )}
+                    {_onGetVariables()?.length > 0 && (
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div>
+                            <LuVariable size={12} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>This chart has variables</Tooltip.Content>
+                      </Tooltip>
+                    )}
+                  </Row>
+                )}
+              </div>
+            </div>
+            <div className={`flex items-center justify-end gap-1 ${isCompact ? "absolute right-2 top-2" : ""}`}>
+              {_checkIfFilters() && (
+                <div className="flex items-center gap-1">
+                  {chartSize?.[2] > 3 && (
+                    <ChartFilters
+                      chart={chart}
+                      onAddFilter={_onAddFilter}
+                      onClearFilter={_onClearFilter}
+                      conditions={activeChartFilters}
+                      inline
+                      size="sm"
+                      amount={1}
+                    />
+                  )}
+                  <Popover>
+                    <Popover.Trigger>
+                      <LinkNext className="text-gray-500">
+                        <Badge.Anchor>
+                          <LuListFilter className="text-default-500" />
+                          <Badge
+                            color="accent"
+                            size="sm"
+                            isInvisible={!activeChartFilters || activeChartFilters.length === 0}
+                          >
+                            {activeChartFilters.length}
+                          </Badge>
+                        </Badge.Anchor>
+                      </LinkNext>
+                    </Popover.Trigger>
+                    <Popover.Content className="pt-3">
+                      <Popover.Dialog>
+                        <ChartFilters
+                          chart={chart}
+                          onAddFilter={_onAddFilter}
+                          onClearFilter={_onClearFilter}
+                          conditions={activeChartFilters}
+                        />
+                      </Popover.Dialog>
+                    </Popover.Content>
+                  </Popover>
+                </div>
+              )}
+              {projectId && !print && (
+                <Dropdown aria-label="Select a chart option">
+                  <Dropdown.Trigger>
+                    <LinkNext className="cursor-pointer chart-settings-tutorial">
+                      <LuEllipsisVertical className="text-default-500" />
+                    </LinkNext>
+                  </Dropdown.Trigger>
+                  <Dropdown.Popover>
+                    <Dropdown.Menu disabledKeys={["status"]}>
+                      <Dropdown.Section>
+                        <Dropdown.Item
+                          id="refresh"
+                          onPress={_onGetChartData}
+                          textValue="Refresh chart"
+                        >
+                          {(chartLoading || chart.loading) ? <Spinner size="sm" aria-label="Refreshing chart" /> : <LuRefreshCw />}
+                          Refresh chart
+                        </Dropdown.Item>
+                        {_canAccess("projectEditor") && (
+                          <Dropdown.Item
+                            id="edit"
+                            onPress={() => navigate(`/dashboard/${params.projectId}/chart/${chart.id}/edit`)}
+                            textValue="Edit chart"
+                          >
+                            <LuSettings />
+                            Edit chart
+                          </Dropdown.Item>
+                        )}
+                        {_canAccess("projectEditor") && chart.draft && (
+                          <Dropdown.Item
+                            id="publish"
+                            onPress={_onPublishChart}
+                            textValue="Publish chart"
+                          >
+                            <LuCircleCheck />
+                            Publish chart
+                          </Dropdown.Item>
+                        )}
+                      </Dropdown.Section>
+                      <Separator />
+                      <Dropdown.Section>
+                        {_canAccess("projectEditor") && (
+                          <Dropdown.Item
+                            id="layout"
+                            onPress={onEditLayout}
+                            showDivider
+                            textValue={editingLayout ? "Complete layout" : "Edit layout"}
+                          >
+                            <LuLayoutDashboard className={editingLayout ? "text-accent" : ""} />
+                            <span className={editingLayout ? "text-accent" : ""}>
+                              {editingLayout ? "Complete layout" : "Edit layout"}
+                            </span>
+                            <Kbd className="ms-auto">
+                              <Kbd.Abbr keyValue={isMac ? "command" : "ctrl"} />
+                              <Kbd.Content>E</Kbd.Content>
+                            </Kbd>
+                          </Dropdown.Item>
+                        )}
+                        {_canAccess("projectEditor") && (
+                          <Dropdown.Item
+                            id="autoupdate"
+                            onPress={_openUpdateModal}
+                            textValue="Auto-update"
+                          >
+                            <LuCalendarClock />
+                            Auto-update
+                          </Dropdown.Item>
+                        )}
+                      </Dropdown.Section>
+                      <Separator />
+                      <Dropdown.Section>
+                        {_canAccess("projectEditor") && (
+                          <Dropdown.Item
+                            id="alerts"
+                            onPress={_openAlertsModal}
+                            textValue="Alerts"
+                            showDivider
+                          >
+                            <LuBell />
+                            Alerts
+                            {chart?.Alerts?.length > 0 && (
+                              <Chip color="default" size="sm" variant="secondary">
+                                {chart?.Alerts?.length}
+                              </Chip>
+                            )}
+                          </Dropdown.Item>
+                        )}
+                        {!chart.draft && _canAccess("projectEditor") && (
+                          <Dropdown.Item
+                            id="report"
+                            onPress={_onChangeReport}
+                            textValue={chart.onReport ? "Remove from report" : "Add to report"}
+                          >
+                            {chart.onReport ? <LuMonitorX /> : <LuMonitor />}
+                            {chart.onReport ? "Remove from report" : "Add to report"}
+                          </Dropdown.Item>
+                        )}
+                        {!chart.draft && chart.public && _canAccess("projectEditor") && (
+                          <Dropdown.Item
+                            id="private"
+                            onPress={_onPublicConfirmation}
+                            textValue={chart.public ? "Make private" : "Make public"}
+                          >
+                            {chart.public ? <LuLockOpen /> : <LuLock />}
+                            {"Make private"}
+                          </Dropdown.Item>
+                        )}
+                        {!chart.draft && _canAccess("projectEditor") && (
+                          <Dropdown.Item
+                            id="embed"
+                            onPress={_onEmbed}
+                            textValue="Embed & Share"
+                          >
+                            <LuShare />
+                            {"Embed & Share"}
+                          </Dropdown.Item>
+                        )}
+                      </Dropdown.Section>
+                      <Dropdown.Section>
+                        <Dropdown.Item
+                          id="export"
+                          onPress={_onExport}
+                          textValue="Export to Excel"
+                          showDivider
+                        >
+                          {exportLoading ? <Spinner size="sm" aria-label="Exporting chart" /> : <LuFileDown />}
+                          Export to Excel
+                        </Dropdown.Item>
+                      </Dropdown.Section>
+                      <Separator />
+                      <Dropdown.Section>
+                        {_canAccess("projectEditor") && (
+                          <Dropdown.Item
+                            id="delete"
+                            variant="danger"
+                            onPress={_onDeleteChartConfirmation}
+                            textValue="Delete chart"
+                          >
+                            <LuTrash />
+                            Delete chart
+                          </Dropdown.Item>
+                        )}
+                      </Dropdown.Section>
+                      <Separator />
+                      <Dropdown.Section>
+                        <Dropdown.Item id="status" isReadOnly className="opacity-100" textValue="Chart details">
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] text-default-500">Last updated: {_getUpdatedTime(chart)}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {chart.autoUpdate > 0 && (
+                                <div className="flex items-center gap-1">
+                                  <LuCalendarClock size={12} />
+                                  <span className="text-[10px] text-default-500">Updates every {_getUpdateFreqText(chart.autoUpdate)}</span>
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {chart.public && !isPublic && !print && (
+                                <div className="flex items-center gap-1">
+                                  <LuLockOpen size={12} />
+                                  <span className="text-[10px] text-default-500">Public chart</span>
+                                </div>
+                              )}
+                              {(!chart.onReport || chart.draft) && (
+                                <div className="flex items-center gap-1">
+                                  <LuMonitorX size={12} />
+                                  <span className="text-[10px] text-default-500">{chart.draft ? "Draft" : "Hidden on report"}</span>
+                                </div>
+                              )}
+                              {chart?.Alerts?.length > 0 && (
+                                <div className="flex items-center gap-1">
+                                  <LuBell size={12} />
+                                  <span className="text-[10px] text-default-500">Has alerts</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </Dropdown.Item>
+                      </Dropdown.Section>
+                    </Dropdown.Menu>
+                  </Dropdown.Popover>
+                </Dropdown>
+              )}
+
+              {showExport && (
+                <Dropdown aria-label="Select an export option">
+                  <Dropdown.Trigger>
+                    <LinkNext className="text-gray-500 cursor-pointer">
+                      <LuEllipsis className="text-default-500" />
+                    </LinkNext>
+                  </Dropdown.Trigger>
+                  <Dropdown.Popover>
+                  <Dropdown.Menu>
+                    <Dropdown.Item
+                      id="export-excel"
+                      onPress={() => _onPublicExport(chart)}
+                      textValue="Export to Excel"
+                    >
+                      {exportLoading ? <Spinner size="sm" aria-label="Exporting chart" /> : <LuFileDown />}
+                      <Text>Export to Excel</Text>
+                    </Dropdown.Item>
+                  </Dropdown.Menu>
+                  </Dropdown.Popover>
+                </Dropdown>
+              )}
+            </div>
+          </Card.Header>
+          <Card.Content
+            className="overflow-y-hidden"
+          >
+            {chart.chartData && (
+              <div className="h-full">
+                {chart.type === "line"
+                  && (
+                    <LineChart
+                      chart={chart}
+                      redraw={redraw}
+                      redrawComplete={() => setRedraw(false)}
+                    />
+                  )}
+                {chart.type === "bar"
+                  && (
+                    <BarChart
+                      chart={chart}
+                      redraw={redraw}
+                      redrawComplete={() => setRedraw(false)}
+                    />
+                  )}
+                {chart.type === "pie"
+                  && (
+                  <PieChart
+                    chart={chart}
+                    height={height}
+                    redraw={redraw}
+                    redrawComplete={() => setRedraw(false)}
+                  />
+                  )}
+                {chart.type === "doughnut"
+                  && (
+                    <DoughnutChart
+                      chart={chart}
+                      height={height}
+                      redraw={redraw}
+                      redrawComplete={() => setRedraw(false)}
+                    />
+                  )}
+                {chart.type === "radar"
+                  && (
+                  <RadarChart
+                    chart={chart}
+                    height={height}
+                    redraw={redraw}
+                    redrawComplete={() => setRedraw(false)}
+                  />
+                  )}
+                {chart.type === "polar"
+                  && (
+                    <PolarChart
+                      chart={chart}
+                      height={height}
+                      redraw={redraw}
+                      redrawComplete={() => setRedraw(false)}
+                    />
+                  )}
+                {chart.type === "matrix"
+                  && (
+                    <MatrixChart
+                      chart={chart}
+                      redraw={redraw}
+                      redrawComplete={() => setRedraw(false)}
+                    />
+                  )}
+                {chart.type === "table"
+                  && (
+                    <div className="h-full">
+                      <TableContainer
+                        tabularData={chart.chartData}
+                        datasets={chart.ChartDatasetConfigs}
+                        defaultRowsPerPage={chart.defaultRowsPerPage}
+                      />
+                    </div>
+                  )}
+                {(chart.type === "kpi" || chart.type === "avg")
+                  && (
+                    <KpiMode
+                      chart={chart}
+                      height={height}
+                      redraw={redraw}
+                      redrawComplete={() => setRedraw(false)}
+                    />
+                  )}
+                {chart.type === "gauge"
+                  && (
+                    <GaugeChart
+                      chart={chart}
+                      height={height}
+                      redraw={redraw}
+                      redrawComplete={() => setRedraw(false)}
+                    />
+                  )}
+              </div>
+            )}
+          </Card.Content>
+        </Card>
+      )}
+
+      {/* DELETE CONFIRMATION MODAL */}
+      <Modal.Backdrop variant="blur" isOpen={deleteModal} onOpenChange={setDeleteModal}>
+        <Modal.Container>
+          <Modal.Dialog>
+          <Modal.Header>
+            <Modal.Heading>Are you sure you want to remove this chart?</Modal.Heading>
+          </Modal.Header>
+          <Modal.Body>
+            <Text>
+              {"All the chart data will be removed and you won't be able to see it on your dashboard anymore if you proceed with the removal."}
+            </Text>
+          </Modal.Body>
+          <Modal.Footer>
+            <Button
+              variant="tertiary"
+              color="warning"
+              onPress={() => setDeleteModal(false)}
+            >
+              Go back
+            </Button>
+            <Button
+              color="danger"
+              onPress={_onDeleteChart}
+              isPending={chartLoading}
+            >
+              Remove completely
+              <LuTrash />
+            </Button>
+          </Modal.Footer>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+
+      {/* MAKE CHART PUBLIC MODAL */}
+      <Modal.Backdrop isOpen={publicModal} onOpenChange={setPublicModal}>
+        <Modal.Container>
+          <Modal.Dialog>
+          <Modal.Header>
+            <Modal.Heading>Are you sure you want to make your chart public?</Modal.Heading>
+          </Modal.Header>
+          <Modal.Body>
+            <Text>
+              {"Public charts will show in your Public Dashboard page and it can be viewed by everyone with access to the unique sharing link. Nobody other than you and your team will be able to edit or update the chart data."}
+            </Text>
+          </Modal.Body>
+          <Modal.Footer>
+            <Button
+              variant="tertiary"
+              color="warning"
+              onPress={() => setPublicModal(false)}
+            >
+              Go back
+            </Button>
+            <Button
+              isPending={publicLoading}
+              color="primary"
+              onPress={_onPublic}
+            >
+              Make the chart public
+              <LuLockOpen />
+            </Button>
+          </Modal.Footer>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+
+      {/* AUTO-UPDATE MODAL */}
+      <Modal.Backdrop isOpen={updateModal} onOpenChange={setUpdateModal}>
+        <Modal.Container>
+          <Modal.Dialog className="sm:max-w-[500px]">
+          <Modal.Header>
+            <Modal.Heading>Set up auto-update for your chart</Modal.Heading>
+          </Modal.Header>
+          <Modal.Body className="p-1">
+            <div>
+              <Row align="center">
+                <Select
+                  selectionMode="single"
+                  value={`${updateFrequency}` || null}
+                  onChange={(value) => {
+                    setUpdateFrequency(parseInt(value, 10));
+                  }}
+                  variant="secondary"
+                  aria-label="Select a preset"
+                  fullWidth
+                >
+                  <Label>Select a preset</Label>
+                  <Select.Trigger>
+                    <Select.Value />
+                    <Select.Indicator />
+                  </Select.Trigger>
+                  <Select.Popover>
+                    <ListBox>
+                      <ListBox.Item id="0" textValue="Don't auto update">
+                        {"Don't auto update"}
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                      <ListBox.Item id="60" textValue="Every minute">
+                        Every minute
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                      <ListBox.Item id="300" textValue="Every 5 minutes">
+                        Every 5 minutes
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                      <ListBox.Item id="900" textValue="Every 15 minutes">
+                        Every 15 minutes
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                      <ListBox.Item id="1800" textValue="Every 30 minutes">
+                        Every 30 minutes
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                      <ListBox.Item id="3600" textValue="Every hour">
+                        Every hour
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                      <ListBox.Item id="10800" textValue="Every 3 hours">
+                        Every 3 hours
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                      <ListBox.Item id="21600" textValue="Every 6 hours">
+                        Every 6 hours
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                      <ListBox.Item id="43200" textValue="Every 12 hours">
+                        Every 12 hours
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                      <ListBox.Item id="86400" textValue="Every day">
+                        Every day
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                      <ListBox.Item id="604800" textValue="Every week">
+                        Every week
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                      <ListBox.Item id="2592000" textValue="Every month">
+                        Every month
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                    </ListBox>
+                  </Select.Popover>
+                </Select>
+              </Row>
+              <div className="h-4" />
+              <Row>
+                <Text>Or enter a custom frequency:</Text>
+              </Row>
+              <Row align="center" className={"gap-2"}>
+                <Input
+                  type="number"
+                  labelPlacement="outside"
+                  startContent={(<Text className={"text-default-400"}>Every</Text>)}
+                  onChange={(e) => setCustomUpdateFreq(e.target.value)}
+                  value={customUpdateFreq}
+                  variant="secondary"
+                  disableAnimation
+                  min={updateFreqType === "seconds" ? 10 : 1}
+                  fullWidth
+                />
+                <Dropdown aria-label="Select a time unit">
+                  <Dropdown.Trigger>
+                    <Button
+                      variant="secondary"
+                      color="default"
+                    >
+                      {updateFreqType}
+                      <div>
+                        <LuChevronDown />
+                      </div>
+                    </Button>
+                  </Dropdown.Trigger>
+                  <Dropdown.Popover>
+                  <Dropdown.Menu>
+                    <Dropdown.Item id="seconds" onPress={() => setUpdateFreqType("seconds")} textValue="Seconds">
+                      <Text>Seconds</Text>
+                    </Dropdown.Item>
+                    <Dropdown.Item id="minutes" onPress={() => setUpdateFreqType("minutes")} textValue="Minutes">
+                      <Text>Minutes</Text>
+                    </Dropdown.Item>
+                    <Dropdown.Item id="hours" onPress={() => setUpdateFreqType("hours")} textValue="Hours">
+                      <Text>Hours</Text>
+                    </Dropdown.Item>
+                    <Dropdown.Item id="days" onPress={() => setUpdateFreqType("days")} textValue="Days">
+                      <Text>Days</Text>
+                    </Dropdown.Item>
+                  </Dropdown.Menu>
+                  </Dropdown.Popover>
+                </Dropdown>
+              </Row>
+              {autoUpdateError && (
+                <>
+                  <div className="h-2" />
+                  <Row>
+                    <Text color="danger">{autoUpdateError}</Text>
+                  </Row>
+                </>
+              )}
+            </div>
+          </Modal.Body>
+          <Modal.Footer>
+            <Button
+              variant="tertiary"
+              color={"warning"}
+              onPress={() => setUpdateModal(false)}
+              size="sm"
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="tertiary"
+              color="danger"
+              isPending={autoUpdateLoading}
+              onPress={() => {
+                setUpdateFrequency(0);
+                _onChangeAutoUpdate(0);
+              }}
+              size="sm"
+            >
+              Stop auto-updating
+              <LuX />
+            </Button>
+            <Button
+              color="primary"
+              isPending={autoUpdateLoading}
+              onPress={() => _onChangeAutoUpdate()}
+              size="sm"
+            >
+              Save
+              <LuCheck />
+            </Button>
+          </Modal.Footer>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+
+      {/* EMBED CHART MODAL */}
+      {chart && (
+        <ChartSharing
+          chart={chart}
+          isOpen={embedModal}
+          onClose={() => setEmbedModal(false)}
+        />
+      )}
+
+
+      {/* ALERTS MODAL */}
+      <Modal.Backdrop isOpen={alertsModal} onOpenChange={setAlertsModal}>
+        <Modal.Container>
+          <Modal.Dialog>
+          <Modal.Header>
+            <Modal.Heading>Alerts</Modal.Heading>
+          </Modal.Header>
+          <Modal.Body className="flex flex-col gap-2 p-1">
+            <div className="text-sm">{"Select a dataset to set up alerts for"}</div>
+            <Select
+              selectionMode="single"
+              value={`${alertsDatasetId}` || null}
+              onChange={(value) => {
+                setAlertsDatasetId(value);
+              }}
+              variant="secondary"
+              aria-label="Select a dataset"
+            >
+              <Select.Trigger>
+                <Select.Value />
+                <Select.Indicator />
+              </Select.Trigger>
+              <Select.Popover>
+                <ListBox>
+                  {chart?.ChartDatasetConfigs?.map((config) => (
+                    <ListBox.Item key={config.id} id={config.id} textValue={config.legend}>
+                      {config.legend}
+                      <ListBox.ItemIndicator />
+                    </ListBox.Item>
+                  ))}
+                </ListBox>
+              </Select.Popover>
+            </Select>
+
+            {alertsDatasetId && (
+              <>
+                <Separator />
+                {chart?.Alerts?.length > 0 && (
+                  <div className="text-sm">{"Your current alerts:"}</div>
+                )}
+
+                <DatasetAlerts
+                  chartType={chart.type}
+                  chartId={chart.id}
+                  cdcId={alertsDatasetId}
+                  projectId={chart.project_id}
+                  onChanged={_onGetChart}
+                />
+              </>
+            )}
+          </Modal.Body>
+          <Modal.Footer>
+            <Button
+              variant="secondary"
+              onPress={() => setAlertsModal(false)}
+            >
+              Close
+            </Button>
+          </Modal.Footer>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </motion.div>
+  );
+}
+
+const styles = {
+  container: {
+    width: "100%",
+    height: "100%",
+  },
+  draft: {
+    marginRight: 10,
+  },
+  filterBtn: (addPadding) => ({
+    position: "absolute",
+    right: addPadding ? 40 : 10,
+    top: 10,
+    backgroundColor: "transparent",
+    boxShadow: "none",
+  }),
+  titleArea: (isKpi) => ({
+    paddingLeft: isKpi ? 15 : 0,
+  }),
+};
+
+Chart.propTypes = {
+  chart: PropTypes.object.isRequired,
+  isPublic: PropTypes.bool,
+  onChangeOrder: PropTypes.func,
+  print: PropTypes.string,
+  height: PropTypes.number,
+  showExport: PropTypes.bool,
+  password: PropTypes.string,
+  editingLayout: PropTypes.bool,
+  onEditLayout: PropTypes.func,
+  onDashboard: PropTypes.bool,
+  dashboardFilters: PropTypes.array,
+  chartFilters: PropTypes.array,
+  onAddChartFilter: PropTypes.func,
+  onClearChartFilter: PropTypes.func,
+  onRefreshRuntimeChart: PropTypes.func,
+};
+
+export default Chart;

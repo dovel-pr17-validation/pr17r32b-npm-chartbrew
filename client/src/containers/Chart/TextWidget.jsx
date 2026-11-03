@@ -1,0 +1,567 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { motion } from "framer-motion"
+import PropTypes from "prop-types"
+import {
+  Card, TextArea, Dropdown, Link as LinkNext,
+  Kbd, Modal, Button,
+  ButtonGroup,
+  Tooltip,
+  Link,
+} from "@heroui/react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
+import { useDispatch, useSelector } from "react-redux"
+import { LuEllipsisVertical, LuMonitorX, LuMonitor, LuTrash, LuPencil, LuLayoutDashboard, LuEye,
+  LuHeading, LuBold, LuItalic, LuQuote, LuCode, LuImage, LuLink, LuListOrdered, LuList, LuSquareCheck
+} from "react-icons/lu";
+import { FaMarkdown } from "react-icons/fa6";
+import { useParams } from "react-router";
+import toast from "react-hot-toast";
+import { debounce } from "lodash";
+
+import { removeChart, updateChart } from "../../slices/chart"
+import canAccess from "../../config/canAccess";
+import { selectUser } from "../../slices/user";
+import { selectTeam } from "../../slices/team";
+import isMac from "../../modules/isMac";
+import { ButtonSpinner } from "../../components/ButtonSpinner";
+
+function TextWidget({
+  chart,
+  onEditLayout,
+  editingLayout,
+  onCancelChanges,
+  onSaveChanges,
+  onEditContent,
+  isPublic = false,
+}) {
+  const [content, setContent] = useState(chart.content || "");
+  const [isEditing, setIsEditing] = useState(false);
+  const [chartLoading, setChartLoading] = useState(false);
+  const [deleteModal, setDeleteModal] = useState(false);
+  const [isPreview, setIsPreview] = useState(false);
+
+  const dispatch = useDispatch();
+  const user = useSelector(selectUser);
+  const team = useSelector(selectTeam);
+  const params = useParams();
+  const textareaRef = useRef(null);
+
+  useEffect(() => {
+    setIsEditing(chart.staged)
+  }, [chart])
+
+  // Add a new handler for interactive elements
+  const handleInteractiveMouseDown = (e) => {
+    e.stopPropagation();
+  };
+
+  const components = {
+    // code: ({ children }) => {
+    //   const formattedText = String(children).replace(/^`|`$/g, ""); // Remove backticks
+
+    //   return (
+    //     <Code>
+    //       {formattedText}
+    //     </Code>
+    //   );
+    // },
+    code: ({ children, className }) => {
+      const formattedText = String(children).replace(/^`|`$/g, ""); // Strip backticks
+
+      return className ? (
+        // Block code (if it has a class, meaning it's a code block)
+        <pre className="bg-content2 text-foreground p-2 rounded-md overflow-auto">
+          <code className={className}>{formattedText}</code>
+        </pre>
+      ) : (
+        // Inline code (if no class)
+        <span className="bg-content2 text-foreground px-1 rounded-sm">{formattedText}</span>
+      );
+    },
+    li: ({ children, className }) => {
+      // If this is a task list item, remove the bullet point and reduce padding
+      if (className?.includes("task-list-item")) {
+        return <li className={`${className} list-none -ml-6`}>{children}</li>;
+      }
+      return <li className={className}>{children}</li>;
+    }
+  };
+
+  const _canAccess = (role) => {
+    return canAccess(role, user.id, team.TeamRoles);
+  }
+
+  const insertMarkdown = (type, e) => {
+    // Stop event propagation to prevent drag-and-drop
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!textareaRef.current) return;
+
+    const textarea = textareaRef.current;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const text = content;
+    const selectedText = text.substring(start, end);
+
+    let insertion = "";
+    let newCursorPosition = start;
+
+    switch (type) {
+      case "heading":
+        insertion = `### ${selectedText || "Heading"}`;
+        newCursorPosition = start + 4; // Position cursor after `### `
+        break;
+      case "bold":
+        insertion = `**${selectedText || "bold text"}**`;
+        newCursorPosition = start + 2; // Position inside the `**`
+        break;
+      case "italic":
+        insertion = `*${selectedText || "italic text"}*`;
+        newCursorPosition = start + 1; // Position inside the `*`
+        break;
+      case "quote":
+        insertion = `> ${selectedText || "quote"}`;
+        newCursorPosition = start + 2; // Position after `> `
+        break;
+      case "code":
+        insertion = `\`${selectedText || "code"}\``;
+        newCursorPosition = start + 1; // Position inside the backticks
+        break;
+      case "image":
+        insertion = "![alt text](image_url)";
+        newCursorPosition = start + 2; // Move cursor inside `[alt text]`
+        break;
+      case "link":
+        insertion = `[${selectedText || "link text"}](url)`;
+        newCursorPosition = start + 1; // Move cursor inside `[ ]`
+        break;
+      case "numbered":
+        insertion = `1. ${selectedText || "First item"}\n2. Second item`;
+        newCursorPosition = start + 3; // Position after `1. `
+        break;
+      case "unordered":
+        insertion = `- ${selectedText || "List item"}\n- Another item`;
+        newCursorPosition = start + 2; // Position after `- `
+        break;
+      case "task":
+        insertion = `- [ ] ${selectedText || "Task item"}\n- [ ] Another task`;
+        newCursorPosition = start + 6; // Position inside `[ ]`
+        break;
+      default:
+        break;
+    }
+
+    const newContent = text.substring(0, start) + insertion + text.substring(end);
+    _onEditContent(newContent);
+
+    // Set cursor position after insertion
+    setTimeout(() => {
+      textarea.focus();
+      textarea.setSelectionRange(newCursorPosition, newCursorPosition);
+    }, 0);
+  };
+
+  const debouncedEditContent = useCallback(
+    debounce((content) => {
+      if (chart.staged) {
+        onEditContent(content);
+      }
+    }, 300),
+    [chart.staged, onEditContent]
+  );
+
+  const _onEditContent = (content) => {
+    setContent(content);
+    debouncedEditContent(content);
+  }
+
+  const _onChangeReport = () => {
+    setChartLoading(true);
+
+    dispatch(updateChart({
+      project_id: params.projectId,
+      chart_id: chart.id,
+      data: { onReport: !chart.onReport },
+    }))
+      .then((response) => {
+        if (response?.error) {
+          toast.error("Error updating the widget");
+        }
+
+        setChartLoading(false);
+      })
+      .catch(() => {
+        toast.error("Error updating the widget");
+        setChartLoading(false);
+      });
+  };
+
+  const _onDeleteChartConfirmation = () => {
+    setDeleteModal(true);
+  }
+
+  const _onDeleteChart = () => {
+    setDeleteModal(false);
+    setChartLoading(true);
+    dispatch(removeChart({
+      project_id: params.projectId,
+      chart_id: chart.id,
+    }))
+      .then((response) => {
+        if (response?.error) {
+          toast.error("Error deleting the widget");
+        }
+
+        setChartLoading(false);
+      })
+      .catch(() => {
+        toast.error("Error deleting the widget");
+        setChartLoading(false);
+      });
+  }
+
+  const _onSaveContent = () => {
+    setChartLoading(true);
+
+    if (chart.staged) {
+      return onSaveChanges();
+    }
+
+    dispatch(updateChart({
+      project_id: params.projectId,
+      chart_id: chart.id,
+      data: { content },
+    }))
+      .then((response) => {
+        if (response?.error) {
+          toast.error("Error updating the widget");
+        }
+
+        setChartLoading(false);
+      })
+      .catch(() => {
+        toast.error("Error updating the widget");
+        setChartLoading(false);
+      });
+  }
+
+  const _onCancelChanges = () => {
+    setIsEditing(false);
+    _onEditContent(chart.content);
+    if (chart.staged) {
+      onCancelChanges();
+    }
+  };
+
+  const MemoizedMarkdown = useMemo(() => (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={components}
+    >
+      {content}
+    </ReactMarkdown>
+  ), [content]);
+
+  return (
+    <motion.div
+      animate={{ opacity: [0, 1] }}
+      transition={{ duration: 0.7 }}
+      className="w-full h-full"
+    >
+      {chart && (
+        <Card
+          className={"h-full bg-surface border-solid border-1 border-divider shadow-none"}
+        >
+          {isEditing && (
+            <>
+              <Card.Content>
+                {!isPreview && (
+                  <>
+                    <div 
+                      className="flex gap-1 flex-wrap"
+                      onMouseDown={handleInteractiveMouseDown}
+                    >
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div className="p-1 rounded-md hover:bg-content2 cursor-pointer" onClick={(e) => insertMarkdown("heading", e)}>
+                            <LuHeading size={16} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Add heading</Tooltip.Content>
+                      </Tooltip>
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div className="p-1 rounded-md hover:bg-content2 cursor-pointer" onClick={(e) => insertMarkdown("bold", e)}>
+                            <LuBold size={16} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Add bold text</Tooltip.Content>
+                      </Tooltip>
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div className="p-1 rounded-md hover:bg-content2 cursor-pointer" onClick={(e) => insertMarkdown("italic", e)}>
+                            <LuItalic size={16} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Add italic text</Tooltip.Content>
+                      </Tooltip>
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div className="p-1 rounded-md hover:bg-content2 cursor-pointer" onClick={(e) => insertMarkdown("quote", e)}>
+                            <LuQuote size={16} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Add quote</Tooltip.Content>
+                      </Tooltip>
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div className="p-1 rounded-md hover:bg-content2 cursor-pointer" onClick={(e) => insertMarkdown("code", e)}>
+                            <LuCode size={16} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Add code</Tooltip.Content>
+                      </Tooltip>
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div className="p-1 rounded-md hover:bg-content2 cursor-pointer" onClick={(e) => insertMarkdown("image", e)}>
+                            <LuImage size={16} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Add image</Tooltip.Content>
+                      </Tooltip>
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div className="p-1 rounded-md hover:bg-content2 cursor-pointer" onClick={(e) => insertMarkdown("link", e)}>
+                            <LuLink size={16} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Add link</Tooltip.Content>
+                      </Tooltip>
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div className="p-1 rounded-md hover:bg-content2 cursor-pointer" onClick={(e) => insertMarkdown("numbered", e)}>
+                            <LuListOrdered size={16} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Add numbered list</Tooltip.Content>
+                      </Tooltip>
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div className="p-1 rounded-md hover:bg-content2 cursor-pointer" onClick={(e) => insertMarkdown("unordered", e)}>
+                            <LuList size={16} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Add bullet list</Tooltip.Content>
+                      </Tooltip>
+                      <Tooltip>
+                        <Tooltip.Trigger>
+                          <div className="p-1 rounded-md hover:bg-content2 cursor-pointer" onClick={(e) => insertMarkdown("task", e)}>
+                            <LuSquareCheck size={16} />
+                          </div>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Add task list</Tooltip.Content>
+                      </Tooltip>
+                    </div>
+                    <div className="h-2" />
+                    <div className="flex flex-col h-full">
+                      <TextArea
+                        value={content}
+                        onChange={(e) => _onEditContent(e.target.value)}
+                        placeholder="Enter markdown text here..."
+                        className="h-full! font-mono"
+                        variant="secondary"
+                        onMouseDown={handleInteractiveMouseDown}
+                        ref={textareaRef}
+                        fullWidth
+                        endContent={(
+                          <Button
+                            variant="tertiary"
+                            size="sm"
+                            onPress={() => setIsPreview(true)}
+                            isPending={chartLoading}
+                            isIconOnly
+                            onMouseDown={handleInteractiveMouseDown}
+                          >
+                            {chartLoading ? <ButtonSpinner /> : <LuEye />}
+                          </Button>
+                        )}
+                        description={
+                          <Link className="flex flex-row gap-1 items-center" href="https://www.markdownguide.org/basic-syntax/" target="_blank">
+                            <FaMarkdown size={18} />
+                            <span className="text-xs text-gray-500">Markdown is supported</span>
+                          </Link>
+                        }
+                      />
+                    </div>
+                  </>
+                )}
+                {isPreview && (
+                  <div className="relative prose prose-xs md:prose-sm dark:prose-invert prose-headings:font-bold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-h4:text-base prose-h5:text-sm prose-h6:text-xs prose-a:text-accent prose-a:hover:text-accent-400 prose-blockquote:border-l-2 prose-blockquote:border-primary prose-blockquote:pl-2 prose-blockquote:italic prose-strong:font-bold prose-em:italic prose-pre:bg-content2 prose-pre:text-foreground prose-pre:p-2 prose-pre:rounded-sm prose-img:rounded-sm prose-img:mx-auto max-w-none p-1 leading-tight [&>p]:mb-4 *:my-2">
+                    <Button
+                      isIconOnly
+                      size="sm" 
+                      variant="tertiary"
+                      className="absolute top-1 right-1"
+                      onPress={() => setIsPreview(false)}
+                    >
+                      <LuPencil />
+                    </Button>
+                    {MemoizedMarkdown}
+                  </div>
+                )}
+              </Card.Content>
+              <Card.Footer>
+                <ButtonGroup fullWidth size="sm">
+                  <Button
+                    variant="tertiary"
+                    onPress={_onCancelChanges}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="tertiary"
+                    onPress={_onSaveContent}
+                    isPending={chartLoading}
+                    color="primary"
+                  >
+                    {chartLoading ? <ButtonSpinner /> : null}
+                    Save
+                  </Button>
+                </ButtonGroup>
+              </Card.Footer>
+            </>
+          )}
+          {!isEditing && (
+            <Card.Content className="relative">
+              {!isPublic && (
+                <div className={`absolute top-4 right-2 ${_canAccess("projectEditor") ? "" : "hidden"}`}>
+                  <Dropdown aria-label="Select a widget option">
+                    <Dropdown.Trigger>
+                      <LinkNext className="text-gray-500 cursor-pointer chart-settings-tutorial">
+                        <LuEllipsisVertical className="text-gray-500" />
+                      </LinkNext>
+                    </Dropdown.Trigger>
+                    <Dropdown.Popover>
+                      <Dropdown.Menu>
+                        {_canAccess("projectEditor") && (
+                          <Dropdown.Item
+                            id="edit-content"
+                            onPress={() => setIsEditing(true)}
+                            textValue="Edit content"
+                          >
+                            <div className="flex flex-row items-center gap-2">
+                              <LuPencil />
+                              <span>Edit content</span>
+                            </div>
+                          </Dropdown.Item>
+                        )}
+                        {_canAccess("projectEditor") && (
+                          <Dropdown.Item
+                            id="edit-layout"
+                            onPress={onEditLayout}
+                            showDivider
+                            textValue={editingLayout ? "Complete layout" : "Edit layout"}
+                          >
+                            <div className="flex w-full flex-row items-center justify-between gap-2">
+                              <div className="flex flex-row items-center gap-2">
+                                <LuLayoutDashboard className={editingLayout ? "text-accent" : ""} />
+                                <span className={editingLayout ? "text-accent" : ""}>
+                                  {editingLayout ? "Complete layout" : "Edit layout"}
+                                </span>
+                              </div>
+                              <Kbd keys={[isMac ? "command" : "ctrl", "e"]}>E</Kbd>
+                            </div>
+                          </Dropdown.Item>
+                        )}
+                        {!chart.draft && _canAccess("projectEditor") && (
+                          <Dropdown.Item
+                            id="report"
+                            onPress={_onChangeReport}
+                            textValue={chart.onReport ? "Remove from report" : "Add to report"}
+                            showDivider
+                          >
+                            <div className="flex flex-row items-center gap-2">
+                              {chart.onReport ? <LuMonitorX /> : <LuMonitor />}
+                              <span>{chart.onReport ? "Remove from report" : "Add to report"}</span>
+                            </div>
+                          </Dropdown.Item>
+                        )}
+                        {_canAccess("projectEditor") && (
+                          <Dropdown.Item
+                            id="delete-widget"
+                            variant="danger"
+                            onPress={_onDeleteChartConfirmation}
+                            textValue="Delete widget"
+                          >
+                            <div className="flex flex-row items-center gap-2">
+                              <LuTrash />
+                              <span>Delete widget</span>
+                            </div>
+                          </Dropdown.Item>
+                        )}
+                      </Dropdown.Menu>
+                    </Dropdown.Popover>
+                  </Dropdown>
+                </div>
+              )}
+
+              <div className="prose prose-xs md:prose-sm dark:prose-invert prose-headings:font-bold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-h4:text-base prose-h5:text-sm prose-h6:text-xs prose-a:text-accent prose-a:hover:text-accent-400 prose-blockquote:border-l-2 prose-blockquote:border-primary prose-blockquote:pl-2 prose-blockquote:italic prose-strong:font-bold prose-em:italic prose-pre:bg-content2 prose-pre:text-foreground prose-pre:p-2 prose-pre:rounded-sm prose-img:rounded-sm prose-img:mx-auto max-w-none p-1 leading-tight [&>p]:mb-4 *:my-2">
+                {MemoizedMarkdown}
+              </div>
+            </Card.Content>
+          )}
+        </Card>
+      )}
+
+      {/* DELETE CONFIRMATION MODAL */}
+      <Modal>
+        <Modal.Backdrop isOpen={deleteModal} onOpenChange={setDeleteModal} variant="blur">
+          <Modal.Container>
+            <Modal.Dialog>
+              <Modal.Header>
+            <div className="font-bold">Remove the widget?</div>
+              </Modal.Header>
+              <Modal.Body>
+            <div className="text-sm">
+              {"The widget will be removed from the dashboard and you won't be able to see it anymore."}
+            </div>
+              </Modal.Body>
+              <Modal.Footer>
+            <Button
+              variant="secondary"
+              onPress={() => setDeleteModal(false)}
+              auto
+            >
+              Go back
+            </Button>
+            <Button
+              color="danger"
+              onPress={_onDeleteChart}
+              isPending={chartLoading}
+            >
+              {chartLoading ? <ButtonSpinner /> : null}
+              Remove completely
+              {!chartLoading ? <LuTrash /> : null}
+            </Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+    </motion.div>
+  );
+}
+
+TextWidget.propTypes = {
+  chart: PropTypes.object.isRequired,
+  onEditLayout: PropTypes.func.isRequired,
+  editingLayout: PropTypes.bool.isRequired,
+  onCancelChanges: PropTypes.func.isRequired,
+  onSaveChanges: PropTypes.func.isRequired,
+  onEditContent: PropTypes.func.isRequired,
+  isPublic: PropTypes.bool,
+};
+
+export default TextWidget

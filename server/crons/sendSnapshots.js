@@ -1,0 +1,135 @@
+const cron = require("node-cron");
+const { DateTime } = require("luxon");
+const { Op } = require("sequelize");
+
+const db = require("../models/models");
+const { getProjectSnapshotTimezone } = require("../modules/projectSnapshotTimezone");
+const { getWeekdayNumber, shouldRunOnWeekday } = require("../modules/scheduleWeekdays");
+const { hasSnapshotChannels } = require("../modules/snapshotChannels");
+
+function buildJobId(entity, id) {
+  return `${entity}_${id}_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+}
+
+async function addSnapshotToQueue(queue, projectId) {
+  await queue.add("sendSnapshot", { id: projectId }, {
+    jobId: buildJobId("snapshot", projectId),
+    deduplication: {
+      id: `snapshot_${projectId}`,
+    },
+  });
+  return true;
+}
+
+async function checkSnapshots(queue) {
+  const conditions = {
+    where: {
+      snapshotSchedule: { [Op.ne]: "" }
+    },
+    attributes: ["id", "lastSnapshotSentAt", "snapshotSchedule", "timezone"],
+  };
+
+  try {
+    const projects = await db.Project.findAll(conditions);
+    if (!projects || projects.length === 0) {
+      return;
+    }
+
+    const snapshotChecks = projects.map(async (project) => {
+      if (!hasSnapshotChannels(project.snapshotSchedule)) {
+        return;
+      }
+
+      const {
+        frequency,
+        dayOfWeek,
+        daysOfWeek,
+        time,
+        frequencyNumber,
+      } = project.snapshotSchedule || {};
+      const timezone = getProjectSnapshotTimezone(project);
+
+      const now = DateTime.now().setZone(timezone);
+      const lastSnapshot = project.lastSnapshotSentAt
+        ? DateTime.fromJSDate(project.lastSnapshotSentAt, { zone: timezone })
+        : null;
+
+      let shouldSend = false;
+
+      if (!lastSnapshot) {
+        shouldSend = frequency !== "daily" || shouldRunOnWeekday(daysOfWeek, now);
+      } else if (frequency === "daily") {
+        const sendTime = DateTime.now()
+          .setZone(timezone)
+          .set({
+            hour: time.hour, minute: time.minute, second: 0, millisecond: 0
+          });
+
+        // Check if we're past today's send time and haven't sent today yet
+        const lastSnapshotToday = lastSnapshot && lastSnapshot.hasSame(sendTime, "day");
+        shouldSend = shouldRunOnWeekday(daysOfWeek, now) && now > sendTime && !lastSnapshotToday;
+      } else if (frequency === "weekly" && dayOfWeek) {
+        const weekdayNumber = getWeekdayNumber(dayOfWeek);
+
+        if (weekdayNumber) {
+          // Find the most recent occurrence of the target weekday
+          let sendTime = DateTime.now()
+            .setZone(timezone)
+            .set({
+              hour: time.hour,
+              minute: time.minute,
+              second: 0,
+              millisecond: 0,
+              weekday: weekdayNumber
+            });
+
+          // If the target day is in the future this week, go back to last week
+          if (sendTime > now) {
+            sendTime = sendTime.minus({ weeks: 1 });
+          }
+
+          // Check if we're past this week's send time and haven't sent this week yet
+          const lastSnapshotThisWeek = lastSnapshot && lastSnapshot.hasSame(sendTime, "week");
+          shouldSend = now > sendTime && !lastSnapshotThisWeek;
+        }
+      } else if (frequency === "every_x_days") {
+        shouldSend = now.diff(lastSnapshot, "days").as("days") >= frequencyNumber;
+      } else if (frequency === "every_x_hours") {
+        shouldSend = now.diff(lastSnapshot, "hours").as("hours") >= frequencyNumber;
+      } else if (frequency === "every_x_minutes") {
+        shouldSend = now.diff(lastSnapshot, "minutes").as("minutes") >= frequencyNumber;
+      }
+
+      if (shouldSend) {
+        await addSnapshotToQueue(queue, project.id);
+      }
+    });
+
+    await Promise.all(snapshotChecks);
+  } catch (error) {
+    console.error(`Error checking and sending snapshots: ${error.message}`); // eslint-disable-line
+  }
+}
+
+module.exports = (queue) => {
+  let isTickRunning = false;
+
+  const runTick = async () => {
+    if (isTickRunning) {
+      return;
+    }
+
+    isTickRunning = true;
+    try {
+      await checkSnapshots(queue);
+    } finally {
+      isTickRunning = false;
+    }
+  };
+
+  runTick();
+
+  cron.schedule("* * * * *", () => {
+    runTick();
+  });
+};

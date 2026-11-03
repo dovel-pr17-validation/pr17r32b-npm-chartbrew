@@ -1,0 +1,154 @@
+const { normalizeProjectScheduleTimezones } = require("../../modules/projectSnapshotTimezone");
+const { hashProjectPassword } = require("../../modules/projectPassword");
+
+module.exports = (sequelize, DataTypes) => {
+  const Project = sequelize.define("Project", {
+    id: {
+      type: DataTypes.INTEGER,
+      primaryKey: true,
+      autoIncrement: true,
+    },
+    team_id: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      reference: {
+        model: "Team",
+        key: "id",
+        onDelete: "cascade",
+      },
+    },
+    name: {
+      type: DataTypes.STRING,
+    },
+    brewName: {
+      type: DataTypes.STRING,
+      unique: true,
+    },
+    dashboardTitle: {
+      type: DataTypes.STRING,
+    },
+    description: {
+      type: DataTypes.TEXT,
+    },
+    backgroundColor: {
+      type: DataTypes.STRING,
+      defaultValue: "#FFFFFF",
+    },
+    titleColor: {
+      type: DataTypes.STRING,
+      defaultValue: "#000000",
+    },
+    headerCode: {
+      type: DataTypes.TEXT,
+    },
+    footerCode: {
+      type: DataTypes.TEXT,
+    },
+    logo: {
+      type: DataTypes.STRING,
+    },
+    logoLink: {
+      type: DataTypes.STRING(1234),
+    },
+    public: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+    passwordProtected: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+    password: {
+      type: DataTypes.STRING,
+    },
+    timezone: {
+      type: DataTypes.STRING,
+    },
+    ghost: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+    updateSchedule: {
+      type: DataTypes.TEXT,
+      set(value) {
+        try {
+          const normalizedProject = normalizeProjectScheduleTimezones({
+            timezone: this.getDataValue("timezone"),
+            updateSchedule: value,
+          });
+
+          if (normalizedProject.timezone) {
+            this.setDataValue("timezone", normalizedProject.timezone);
+          }
+
+          this.setDataValue("updateSchedule", JSON.stringify(normalizedProject.updateSchedule));
+        } catch (error) {
+          this.setDataValue("updateSchedule", "{}");
+        }
+      },
+      get() {
+        try {
+          return JSON.parse(this.getDataValue("updateSchedule"));
+        } catch (error) {
+          return {};
+        }
+      },
+    },
+    snapshotSchedule: {
+      type: DataTypes.TEXT,
+      set(value) {
+        const normalizedProject = normalizeProjectScheduleTimezones({
+          timezone: this.getDataValue("timezone"),
+          snapshotSchedule: value,
+        });
+
+        if (normalizedProject.timezone) {
+          this.setDataValue("timezone", normalizedProject.timezone);
+        }
+
+        this.setDataValue("snapshotSchedule", JSON.stringify(normalizedProject.snapshotSchedule));
+      },
+      get() {
+        try {
+          return JSON.parse(this.getDataValue("snapshotSchedule"));
+        } catch (error) {
+          return {};
+        }
+      },
+    },
+    lastUpdatedAt: {
+      type: DataTypes.DATE,
+    },
+    lastSnapshotSentAt: {
+      type: DataTypes.DATE,
+    },
+    currentSnapshot: {
+      type: DataTypes.STRING,
+    },
+  }, {
+    freezeTableName: true,
+    hooks: {
+      beforeCreate: async (project) => {
+        if (project.password) {
+          project.password = await hashProjectPassword(project.password);
+        }
+      },
+      beforeUpdate: async (project) => {
+        if (project.changed("password") && project.password) {
+          project.password = await hashProjectPassword(project.password);
+        }
+      },
+    },
+  });
+
+  Project.associate = (models) => {
+    models.Project.hasMany(models.ProjectRole, { foreignKey: "project_id" });
+    models.Project.hasMany(models.Chart, { foreignKey: "project_id" });
+    models.Project.hasMany(models.Variable, { foreignKey: "project_id" });
+    models.Project.hasMany(models.DashboardFilter, { foreignKey: "project_id" });
+    models.Project.belongsTo(models.Team, { foreignKey: "team_id" });
+    models.Project.hasMany(models.SharePolicy, { foreignKey: "entity_id", scope: { entity_type: "Project" } });
+  };
+
+  return Project;
+};

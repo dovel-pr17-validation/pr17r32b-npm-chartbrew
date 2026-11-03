@@ -1,0 +1,435 @@
+import React, { useEffect, useState } from "react";
+import PropTypes from "prop-types";
+import { useDispatch, useSelector } from "react-redux";
+import {
+  Button, Checkbox, Input, Link, Label, Modal, Table,
+  TextField,
+  EmptyState,
+} from "@heroui/react";
+import { formatRelative } from "date-fns";
+
+import {
+  createIntegration, deleteIntegration, updateIntegration, getTeamIntegrations,
+  selectIntegrations,
+} from "../../../slices/integration";
+import { ButtonSpinner } from "../../../components/ButtonSpinner";
+import { LuExternalLink, LuInfo, LuPencilLine, LuPlus, LuSlack, LuTrash, LuWebhook } from "react-icons/lu";
+
+const urlRegex = /^https?:\/\/.+/;
+
+function WebhookIntegrations({ teamId }) {
+  const [createOpen, setCreateOpen] = useState(false);
+  const [newIntegration, setNewIntegration] = useState({});
+  const [createLoading, setCreateLoading] = useState(false);
+  const [error, setError] = useState(false);
+  const [integrationToDelete, setIntegrationToDelete] = useState("");
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteError, setDeleteError] = useState(false);
+  const [slackModalOpen, setSlackModalOpen] = useState(false);
+  const [urlError, setUrlError] = useState(false);
+
+  const integrations = useSelector(selectIntegrations);
+  const webhookIntegrations = integrations.filter((i) => i.type === "webhook");
+  const dispatch = useDispatch();
+
+  useEffect(() => {
+    if (newIntegration.url?.indexOf("https://hooks.slack.com") > -1) {
+      setNewIntegration({
+        ...newIntegration,
+        slackMode: true,
+      });
+    }
+  }, [newIntegration.url]);
+
+  const _onCreate = () => {
+    setUrlError(false);
+
+    if (newIntegration.name === "" || newIntegration.url === "") {
+      return;
+    }
+
+    // Validate URL format
+    if (!urlRegex.test(newIntegration.url)) {
+      setUrlError(true);
+      return;
+    }
+
+    setCreateLoading(true);
+    dispatch(createIntegration({
+      data: {
+        team_id: teamId,
+        name: newIntegration.name,
+        type: "webhook",
+        config: {
+          url: newIntegration.url,
+          slackMode: newIntegration.slackMode,
+        },
+      },
+    }))
+      .then((data) => {
+        setCreateLoading(false);
+        if (data?.error) {
+          setError(true);
+        } else {
+          setCreateOpen(false);
+          setNewIntegration({});
+        }
+      })
+      .catch(() => {
+        setCreateLoading(false);
+        setError(true);
+      });
+  };
+
+  const _onDelete = () => {
+    setDeleteLoading(true);
+    dispatch(deleteIntegration({
+      team_id: teamId,
+      integration_id: integrationToDelete,
+    }))
+      .then((data) => {
+        setDeleteLoading(false);
+        if (data?.error) {
+          setDeleteError(true);
+        } else {
+          setIntegrationToDelete(false);
+          dispatch(getTeamIntegrations({ team_id: teamId }));
+        }
+      })
+      .catch(() => {
+        setDeleteLoading(false);
+        setDeleteError(true);
+      });
+  };
+
+  const _onEditOpen = (integration) => {
+    setNewIntegration({
+      id: integration.id,
+      name: integration.name,
+      url: integration.config.url,
+      slackMode: integration.config.slackMode,
+    });
+    setCreateOpen(true);
+  };
+
+  const _onEdit = () => {
+    setUrlError(false);
+
+    if (newIntegration.name === "" || newIntegration.url === "") {
+      return;
+    }
+
+    // Validate URL format
+    if (!urlRegex.test(newIntegration.url)) {
+      setUrlError(true);
+      return;
+    }
+
+    setCreateLoading(true);
+    dispatch(updateIntegration({
+      team_id: teamId,
+      integration_id: newIntegration.id,
+      data: {
+        name: newIntegration.name,
+        config: {
+        url: newIntegration.url,
+        slackMode: newIntegration.slackMode,
+        },
+      },
+    }))
+      .then((data) => {
+        setCreateLoading(false);
+        if (data?.error) {
+          setError(true);
+        } else {
+          setCreateOpen(false);
+          setNewIntegration({});
+          getTeamIntegrations(teamId);
+        }
+      })
+      .catch(() => {
+        setCreateLoading(false);
+        setError(true);
+      });
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center">
+          <LuWebhook size={24} />
+          <div className="w-1" />
+          <div className="text-lg font-semibold">Webhooks</div>
+        </div>
+        <div className="w-2" />
+        <Button
+          onPress={() => {
+            setCreateOpen(true);
+          }}
+          variant="primary"
+          size="sm"
+        >
+          <LuPlus />
+          Add a new webhook
+        </Button>
+      </div>
+      <div className="text-sm text-foreground-500">
+        {"Create webhooks to send alerts and reports to external services"}
+      </div>
+      <div className="h-4" />
+      <div>
+        <div className="text-sm">
+          <Link className="text-sm text-foreground/80!" href="https://docs.chartbrew.com/integrations/webhooks" target="_blank" rel="noopener">
+            <LuExternalLink size={16} />
+            <div className="w-1" />
+            {"Click to see what Chartbrew sends over the webhook"}
+          </Link>
+        </div>
+      </div>
+      <div className="h-1" />
+      <div>
+        <div className="text-sm">
+          <Link className="text-sm text-foreground/80!" onPress={() => setSlackModalOpen(true)}>
+            <LuSlack size={16} />
+            <div className="w-1" />
+            {"Want to send events to Slack? Check out how to do it here"}
+          </Link>
+        </div>
+      </div>
+      <div className="h-2" />
+      <Table className="border border-divider shadow-none">
+        <Table.ScrollContainer>
+          <Table.Content
+            aria-label="Webhook integrations"
+            className="min-w-full even:[&_tbody>tr]:bg-content2/30"
+          >
+            <Table.Header>
+              <Table.Column id="name" isRowHeader textValue="Name">
+                Name
+              </Table.Column>
+              <Table.Column id="url" textValue="URL">
+                URL
+              </Table.Column>
+              <Table.Column id="created" className="text-end" textValue="Date created">
+                Date created
+              </Table.Column>
+              <Table.Column id="actions" className="w-12 text-end" textValue="Actions" />
+            </Table.Header>
+
+            <Table.Body renderEmptyState={() => (
+              <EmptyState className="flex min-h-[160px] w-full flex-col items-center justify-center gap-4 text-center">
+                <LuWebhook size={24} />
+                <span className="text-sm text-muted">No results found</span>
+              </EmptyState>
+            )}>
+              {webhookIntegrations.map((i) => (
+                <Table.Row key={i.id} id={String(i.id)}>
+                  <Table.Cell>
+                    {i.name}
+                  </Table.Cell>
+                  <Table.Cell className="max-w-[300px] truncate">
+                    <div className="truncate">
+                      {i.config?.url || "No URL"}
+                    </div>
+                  </Table.Cell>
+                  <Table.Cell>
+                    {formatRelative(new Date(i.createdAt), new Date())}
+                  </Table.Cell>
+                  <Table.Cell>
+                    <div className="flex items-center">
+                      <Button
+                        isIconOnly
+                        variant="ghost"
+                        onPress={() => _onEditOpen(i)}
+                        size="sm"
+                      >
+                        <LuPencilLine size={18} />
+                      </Button>
+                      <Button
+                        isIconOnly
+                        variant="ghost" onPress={() => setIntegrationToDelete(i.id)}
+                        size="sm"
+                      >
+                        <LuTrash size={18} />
+                      </Button>
+                    </div>
+                  </Table.Cell>
+                </Table.Row>
+              ))}
+            </Table.Body>
+          </Table.Content>
+        </Table.ScrollContainer>
+      </Table>
+
+      <Modal>
+        <Modal.Backdrop isOpen={createOpen} onOpenChange={setCreateOpen}>
+          <Modal.Container>
+            <Modal.Dialog className="sm:max-w-xl">
+              <Modal.Header>
+            <div className="font-bold">
+              {!newIntegration.id && "Create a new webhook integration"}
+              {newIntegration.id && "Update the webhook"}
+            </div>
+              </Modal.Header>
+              <Modal.Body className="flex flex-col gap-2 p-1">
+                <div>
+                  <TextField name="webhook-name" isInvalid={Boolean(newIntegration.nameError)}>
+                    <Label>A name to recognize this integration</Label>
+                    <Input
+                      placeholder="Webhook name"
+                      fullWidth
+                      value={newIntegration.name}
+                      onChange={(e) => {
+                        setNewIntegration({ ...newIntegration, name: e.target.value.slice(0, 20) });
+                      }}
+                      variant="secondary"
+                      required
+                      description={`${newIntegration.name?.length || 0}/20 characters`}
+                    />
+                  </TextField>
+                </div>
+                <div>
+                  <TextField name="webhook-url" isInvalid={urlError}>
+                    <Label>The URL where Chartbrew sends a POST request to</Label>
+                    <Input
+                      placeholder="Webhook URL"
+                      fullWidth
+                      value={newIntegration.url}
+                      onChange={(e) => setNewIntegration({ ...newIntegration, url: e.target.value })}
+                      variant="secondary"
+                    />
+                  </TextField>
+                </div>
+                <div className="flex items-center">
+                  <Checkbox
+                    id="webhook-slack-mode"
+                    isSelected={newIntegration.slackMode}
+                    onChange={(isSelected) => {
+                      setNewIntegration({ ...newIntegration, slackMode: isSelected });
+                    }}
+                    variant="secondary"
+                  >
+                    <Checkbox.Content>
+                      <Checkbox.Control className="size-4 shrink-0">
+                        <Checkbox.Indicator />
+                      </Checkbox.Control>
+                      This is a Slack webhook
+                    </Checkbox.Content>
+                  </Checkbox>
+                  <div className="w-3" />
+                  <Link onPress={() => setSlackModalOpen(true)} className="text-sm cursor-pointer">
+                    <LuInfo size={16} />
+                    <div className="w-1" />
+                    {"What is this?"}
+                  </Link>
+                </div>
+                {error && (
+                  <div className="text-danger text-sm">
+                    There was an error creating the integration. Please try again.
+                  </div>
+                )}
+              </Modal.Body>
+              <Modal.Footer>
+            <Button
+              auto
+              onPress={() => setCreateOpen(false)}
+              variant="secondary"
+            >
+              Close
+            </Button>
+            <Button
+              auto
+              onPress={!newIntegration.id ? _onCreate : _onEdit} isPending={createLoading}
+            >
+              {createLoading ? <ButtonSpinner /> : null}
+              {!newIntegration.id && "Create"}
+              {newIntegration.id && "Update"}
+            </Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+
+      <Modal>
+        <Modal.Backdrop isOpen={!!integrationToDelete} onOpenChange={(nextOpen) => { if (!nextOpen) setIntegrationToDelete(false); }}>
+          <Modal.Container>
+            <Modal.Dialog>
+              <Modal.Header>
+            <div className="font-bold">Are you sure you want to delete this integration?</div>
+              </Modal.Header>
+              <Modal.Body>
+            <div>
+              All alerts that are configured to use this integration will be disabled.
+            </div>
+            {deleteError && (
+              <div className="text-danger text-sm">There was an error deleting the integration. Please try again.</div>
+            )}
+              </Modal.Body>
+              <Modal.Footer>
+            <Button
+              auto
+              onPress={() => setIntegrationToDelete(false)}
+              variant="secondary"
+            >
+              Close
+            </Button>
+            <Button
+              variant="danger"
+              onPress={_onDelete} isPending={deleteLoading}
+            >
+              {deleteLoading ? <ButtonSpinner /> : null}
+              Delete
+            </Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+
+      <Modal>
+        <Modal.Backdrop isOpen={slackModalOpen} onOpenChange={setSlackModalOpen}>
+          <Modal.Container>
+            <Modal.Dialog className="sm:max-w-5xl">
+              <Modal.Header>
+            <div className="font-bold">How to set up Slack alerts</div>
+              </Modal.Header>
+              <Modal.Body>
+            <div
+              className="relative pb-[56.25%] min-h-full"
+            >
+              <iframe
+                title="Chartbrew Slack alerts"
+                src="https://www.loom.com/embed/84e390c2e9b844748cb30812dc0591e1"
+                frameBorder="0"
+                webkitallowfullscreen
+                mozallowfullscreen
+                allowFullScreen
+                style={{
+                  position: "absolute", top: 0, left: 0, width: "100%", height: "100%", borderRadius: 20,
+                }}
+              />
+            </div>
+              </Modal.Body>
+              <Modal.Footer>
+            <Button
+              auto
+              onPress={() => setSlackModalOpen(false)}
+              variant="secondary"
+            >
+              Close
+            </Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+    </div>
+  );
+}
+
+WebhookIntegrations.propTypes = {
+  teamId: PropTypes.string.isRequired,
+};
+
+export default WebhookIntegrations;

@@ -1,0 +1,751 @@
+const simplecrypt = require("simplecrypt");
+const { v4: uuid } = require("uuid");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt");
+const { nanoid } = require("nanoid");
+const { TOTP } = require("otpauth");
+const QRCode = require("qrcode");
+const { Op } = require("sequelize");
+
+const db = require("../models/models");
+const mail = require("../modules/mail");
+const socketManager = require("../modules/socketManager");
+
+const settings = process.env.NODE_ENV === "production" ? require("../settings") : require("../settings-dev");
+
+const PASSWORD_RESET_TOKEN_TTL = 30 * 60 * 1000;
+
+const sc = simplecrypt({
+  password: settings.secret,
+  salt: "10",
+});
+
+class UserController {
+  createUser(user) {
+    let gNewUser;
+    return db.User.findOne({ where: { email: user.email } })
+      .then(async (foundUser) => {
+        if (foundUser) return new Promise((resolve, reject) => reject(new Error(409)));
+
+        const bcryptHash = await bcrypt.hash(user.password, 10);
+
+        return db.User.create({
+          name: user.name,
+          email: user.email,
+          password: bcryptHash,
+          icon: user.icon,
+          active: true,
+        });
+      })
+      .then((newUser) => {
+        gNewUser = newUser;
+
+        if (settings.teamRestricted === "1") {
+          return newUser;
+        }
+
+        const newTeam = {
+          name: `${newUser.name}'s team`
+        };
+        return db.Team.create(newTeam);
+      })
+      .then((data) => {
+        if (settings.teamRestricted === "1") {
+          return data;
+        }
+
+        // create a default first project
+        const newProject = {
+          name: "My first dashboard",
+          team_id: data.id,
+          brewName: `my-first-dashboard-${nanoid(8)}`,
+          dashboardTitle: "My first dashboard",
+        };
+
+        // create a ghost project
+        const ghostProject = {
+          team_id: data.id,
+          name: "Ghost Project",
+          brewName: `ghost-project-${nanoid(8)}`,
+          dashboardTitle: "Ghost Project",
+          ghost: true,
+        };
+
+        // create async
+        db.Project.create(newProject);
+        db.Project.create(ghostProject);
+
+        const teamRole = {
+          team_id: data.id,
+          user_id: gNewUser.id,
+          role: "teamOwner",
+          canExport: true,
+        };
+        return db.TeamRole.create(teamRole);
+      })
+      .then(() => {
+        return gNewUser;
+      })
+      .catch((error) => {
+        return new Promise((resolve, reject) => reject(new Error(error.message)));
+      });
+  }
+
+  async deleteUser(id) {
+    const transaction = await db.sequelize.transaction();
+    const cleanupConversations = async (where) => {
+      const conversations = await db.AiConversation.findAll({
+        attributes: ["id"],
+        where,
+        transaction
+      });
+
+      if (conversations.length < 1) {
+        return;
+      }
+
+      const conversationIds = conversations.map((conversation) => conversation.id);
+
+      await Promise.all([
+        db.AiMessage.destroy({
+          where: { conversation_id: { [Op.in]: conversationIds } },
+          transaction
+        }),
+        db.AiUsage.update(
+          { conversation_id: null },
+          {
+            where: { conversation_id: { [Op.in]: conversationIds } },
+            transaction
+          }
+        )
+      ]);
+
+      await db.AiConversation.destroy({
+        where: { id: { [Op.in]: conversationIds } },
+        transaction
+      });
+    };
+
+    try {
+      await cleanupConversations({ user_id: id });
+
+      await Promise.all([
+        db.SavedQuery.destroy({
+          where: { "user_id": id },
+          transaction
+        }),
+        db.ChartCache.destroy({
+          where: { "user_id": id },
+          transaction
+        }),
+        db.User2fa.destroy({
+          where: { "user_id": id },
+          transaction
+        }),
+        db.PinnedDashboard.destroy({
+          where: { "user_id": id },
+          transaction
+        }),
+        db.ProjectRole.destroy({
+          where: { "user_id": id },
+          transaction
+        }),
+        db.TeamInvitation.destroy({
+          where: { "user_id": id },
+          transaction
+        })
+      ]);
+
+      const teamRoles = await db.TeamRole.findAll({
+        where: { "user_id": id },
+        transaction
+      });
+      const ownedTeamIds = [...new Set(
+        teamRoles
+          .filter((teamRole) => teamRole.role === "teamOwner")
+          .map((teamRole) => teamRole.team_id)
+      )];
+
+      // Keep team cleanup sequential to preserve delete order per team.
+      /* oxlint-disable no-await-in-loop */
+      for (const teamId of ownedTeamIds) {
+        const projects = await db.Project.findAll({
+          attributes: ["id"],
+          where: { "team_id": teamId },
+          transaction
+        });
+
+        const projectIds = projects.map((project) => project.id);
+        if (projectIds.length > 0) {
+          await Promise.all([
+            db.Variable.destroy({
+              where: { "project_id": { [Op.in]: projectIds } },
+              transaction
+            }),
+            db.DashboardFilter.destroy({
+              where: { "project_id": { [Op.in]: projectIds } },
+              transaction
+            }),
+            db.ProjectRole.destroy({
+              where: { "project_id": { [Op.in]: projectIds } },
+              transaction
+            }),
+            db.Chart.destroy({
+              where: { "project_id": { [Op.in]: projectIds } },
+              transaction
+            })
+          ]);
+        }
+
+        await cleanupConversations({ team_id: teamId });
+
+        await Promise.all([
+          db.PinnedDashboard.destroy({
+            where: { "team_id": teamId },
+            transaction
+          }),
+          db.SavedQuery.destroy({
+            where: { "team_id": teamId },
+            transaction
+          }),
+          db.Integration.destroy({
+            where: { "team_id": teamId },
+            transaction
+          }),
+          db.OAuth.destroy({
+            where: { "team_id": teamId },
+            transaction
+          }),
+          db.Template.destroy({
+            where: { "team_id": teamId },
+            transaction
+          }),
+          db.Apikey.destroy({
+            where: { "team_id": teamId },
+            transaction
+          }),
+          db.Project.destroy({
+            where: { "team_id": teamId },
+            transaction
+          }),
+          db.Dataset.destroy({
+            where: { "team_id": teamId },
+            transaction
+          }),
+          db.Connection.destroy({
+            where: { "team_id": teamId },
+            transaction
+          }),
+          db.TeamInvitation.destroy({
+            where: { "team_id": teamId },
+            transaction
+          }),
+          db.TeamRole.destroy({
+            where: { "team_id": teamId },
+            transaction
+          }),
+          db.AiUsage.destroy({
+            where: { "team_id": teamId },
+            transaction
+          })
+        ]);
+
+        await db.Team.destroy({
+          where: { "id": teamId },
+          transaction
+        });
+      }
+      /* oxlint-enable no-await-in-loop */
+
+      await db.TeamRole.destroy({
+        where: { "user_id": id },
+        transaction
+      });
+
+      await db.User.destroy({
+        where: { id },
+        transaction
+      });
+
+      // Commit the transaction
+      await transaction.commit();
+
+      return { deleted: true };
+    } catch (error) {
+      // Rollback the transaction on any error
+      await transaction.rollback();
+      throw error;
+    }
+  }
+
+  async login(email, password) {
+    try {
+      if (typeof email !== "string" || typeof password !== "string") throw new Error(401);
+      const foundUser = await db.User.findOne({ where: { email } });
+
+      if (!foundUser) {
+        throw new Error(401);
+      }
+
+      let isAuthenticated = false;
+
+      if (foundUser.password.startsWith("$2a$") || foundUser.password.startsWith("$2b$") || foundUser.password.startsWith("$2y$")) {
+        isAuthenticated = await bcrypt.compare(password, foundUser.password);
+      } else {
+        isAuthenticated = (foundUser.password === sc.encrypt(password));
+
+        if (isAuthenticated) {
+          const bcryptHash = await bcrypt.hash(password, 10);
+          await db.User.update({ password: bcryptHash }, { where: { email } });
+        }
+      }
+
+      if (!isAuthenticated) {
+        throw new Error(401);
+      }
+
+      const user2FA = await db.User2fa.findOne({
+        where: { user_id: foundUser.id, isEnabled: true }
+      });
+
+      if (user2FA?.id) {
+        return new Promise((resolve) => resolve({
+          user_id: foundUser.id, method_id: user2FA.id, method: user2FA.method,
+        }));
+      }
+
+      return foundUser;
+    } catch (error) {
+      throw new Error(error.message);
+    }
+  }
+
+  async validate2FaLogin(userId, methodId, token) {
+    const user2FA = await db.User2fa.findByPk(methodId);
+
+    if (`${user2FA.user_id}` !== `${userId}`) {
+      return new Promise((resolve, reject) => reject({ error: "User mismatch" }));
+    }
+
+    if (!user2FA) {
+      return new Promise((resolve, reject) => reject({ error: "2FA method does not exist" }));
+    }
+
+    const totp = new TOTP({
+      secret: user2FA.secret
+    });
+
+    const delta = totp.validate({ token, window: 1 });
+    if (delta !== null) {
+      const foundUser = await db.User.findOne({ where: { id: user2FA.user_id } });
+      return foundUser;
+    }
+
+    // Avoid triggering the model getter when backup is null (getter decrypts the value)
+    if (user2FA.getDataValue("backup")) {
+      try {
+        const backupCodes = JSON.parse(user2FA.backup);
+        if (backupCodes.includes(token)) {
+          const foundUser = await db.User.findOne({ where: { id: user2FA.user_id } });
+          if (foundUser) {
+            const newBackupCodes = backupCodes.filter((code) => code !== token);
+            await user2FA.update({ backup: JSON.stringify(newBackupCodes) });
+            return foundUser;
+          }
+        }
+      } catch (e) {
+        // do nothing
+      }
+    }
+
+    return new Promise((resolve, reject) => reject(new Error(401)));
+  }
+
+  findAll() {
+    return db.User.findAll({
+      attributes: { exclude: ["password", "passwordResetToken", "sessionVersion"] },
+    })
+      .then((users) => {
+        return Promise.resolve(users);
+      })
+      .catch((error) => {
+        return Promise.reject(error);
+      });
+  }
+
+  findById(id) {
+    return db.User.findOne({
+      where: { "id": id },
+      include: [{ model: db.TeamRole }, { model: db.PinnedDashboard, required: false }],
+    }).then((user) => {
+      if (!user) return new Promise((resolve, reject) => reject(new Error(404)));
+      return user;
+    }).catch((error) => {
+      return new Promise((resolve, reject) => reject(error.message));
+    });
+  }
+
+  findByEmail(email) {
+    return db.User.findOne({
+      where: { email },
+      include: [{ model: db.TeamRole }],
+    }).then((user) => {
+      if (!user) return new Promise((resolve, reject) => reject(new Error(404)));
+      return user;
+    }).catch((error) => {
+      return new Promise((resolve, reject) => reject(error.message));
+    });
+  }
+
+  emailExists(email) {
+    return db.User.findOne({ where: { email } })
+      .then((user) => {
+        if (user !== null) return true;
+        return false;
+      }).catch((error) => {
+        return new Promise((resolve, reject) => reject(new Error(error)));
+      });
+  }
+
+  update(id, data) {
+    return db.User.update(data, { where: { "id": id } })
+      .then(() => {
+        return this.findById(id);
+      })
+      .catch((error) => {
+        return new Promise((resolve, reject) => reject(new Error(error)));
+      });
+  }
+
+  getTeamInvitesByUser(email) {
+    return db.TeamInvitation.findAll({
+      where: { email },
+      include: [{ model: db.Team }],
+    })
+      .then((invites) => {
+        const idsArray = [];
+        invites.forEach((invite) => {
+          idsArray.push(invite.team_id);
+        });
+        if (idsArray < 1) return new Promise((resolve) => resolve([]));
+        return db.Team.findAll({ where: { id: idsArray } })
+          .then((teams) => {
+            return new Promise((resolve) => resolve([invites, teams]));
+          });
+      })
+      .catch((error) => {
+        return new Promise((resolve, reject) => reject(error));
+      });
+  }
+
+  getUsersById(ids, teamId) {
+    return db.User.findAll({
+      where: { id: ids },
+      include: [{
+        model: db.TeamRole,
+        where: {
+          team_id: teamId
+        }
+      }],
+      attributes: { exclude: ["password", "passwordResetToken", "sessionVersion"] },
+    }).then((users) => {
+      return users;
+    }).catch((error) => {
+      return new Promise((resolve, reject) => reject(error));
+    });
+  }
+
+  requestPasswordReset(email) {
+    const newToken = `${uuid()}.${Date.now() + PASSWORD_RESET_TOKEN_TTL}`;
+    return db.User.findOne({ where: { email } })
+      .then((user) => {
+        if (!user) {
+          return new Promise((resolve, reject) => reject(new Error(404)));
+        }
+
+        return this.update(user.id, { passwordResetToken: newToken });
+      })
+      .then((user) => {
+        return mail.passwordReset({
+          email: user.email,
+          resetUrl: `${settings.client}/passwordReset?token=${newToken}`,
+        });
+      })
+      .then((body) => {
+        return new Promise((resolve) => resolve(body));
+      })
+      .catch((error) => {
+        return new Promise((resolve, reject) => reject(error));
+      });
+  }
+
+  async changePassword({ token, password }) {
+    if (typeof token !== "string" || !token || typeof password !== "string" || password.length < 6) {
+      throw new Error(401);
+    }
+
+    const expiresAt = Number(token.slice(token.lastIndexOf(".") + 1));
+    if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) {
+      throw new Error(401);
+    }
+
+    const existingUser = await db.User.findOne({ where: { passwordResetToken: token } });
+    if (!existingUser) throw new Error(401);
+
+    const bcryptHash = await bcrypt.hash(password, 10);
+    const [updatedUsers] = await db.User.update({
+      passwordResetToken: null,
+      password: bcryptHash,
+      sessionVersion: existingUser.sessionVersion + 1,
+    }, {
+      where: {
+        id: existingUser.id,
+        passwordResetToken: token,
+      },
+    });
+
+    if (!updatedUsers) throw new Error(401);
+    socketManager.io?.in(`user:${existingUser.id}`).disconnectSockets(true);
+    return { completed: true };
+  }
+
+  areThereAnyUsers() {
+    return db.User.findAll({ limit: 1 })
+      .then((users) => {
+        if (!users || users.length === 0) {
+          return false;
+        }
+        return true;
+      })
+      .catch((err) => {
+        return err;
+      });
+  }
+
+  requestEmailUpdate(id, email) {
+    // check if the email is already in use
+    return this.emailExists(email)
+      .then((exists) => {
+        if (exists) {
+          return new Promise((resolve, reject) => reject(new Error(409)));
+        }
+
+        return db.User.findByPk(id);
+      })
+      .then((userData) => {
+        const tokenPayload = {
+          id: userData.id,
+          email: userData.email,
+          newEmail: email,
+        };
+
+        const token = jwt.sign(tokenPayload, settings.encryptionKey, {
+          expiresIn: "3h",
+        });
+
+        return mail.emailUpdate({
+          email,
+          updateUrl: `${settings.client}/user/profile?email=${token}`,
+        });
+      })
+      .catch((error) => {
+        return new Promise((resolve, reject) => reject(error));
+      });
+  }
+
+  updateEmail(id, token) {
+    let decodedToken;
+    try {
+      decodedToken = jwt.verify(token, settings.encryptionKey);
+    } catch (e) {
+      return new Promise((resolve, reject) => reject(e));
+    }
+
+    if (`${decodedToken.id}` !== `${id}`) {
+      return new Promise((resolve, reject) => reject(new Error(401)));
+    }
+
+    // check if email exists
+    return this.emailExists(decodedToken.newEmail)
+      .then((exists) => {
+        if (exists) {
+          return new Promise((resolve, reject) => reject(new Error(409)));
+        }
+
+        return db.User.findByPk(id);
+      })
+      .then((userData) => {
+        if (userData.email !== decodedToken.email) {
+          return new Promise((resolve, reject) => reject(new Error(401)));
+        }
+
+        return this.update(id, { email: decodedToken.newEmail });
+      })
+      .then(() => {
+        return this.findById(id);
+      })
+      .catch((error) => {
+        return new Promise((resolve, reject) => reject(error));
+      });
+  }
+
+  generateQrCodeUrl(email, secret) {
+    const totp = new TOTP({
+      secret,
+      issuer: "Chartbrew",
+      label: email,
+      digits: 6,
+      period: 30,
+    });
+
+    return totp.toString();
+  }
+
+  async setup2faApp(userId) {
+    const user = await this.findById(userId);
+    if (!user) {
+      return new Promise((resolve, reject) => reject(new Error(404)));
+    }
+
+    const secret = new TOTP().secret.base32;
+
+    // Save secret to DB
+    await db.User2fa.create({
+      user_id: userId,
+      secret,
+      method: "app",
+      isEnabled: false, // Enabled after verification only
+    });
+
+    // Generate QR Code URL
+    const qrCodeURL = this.generateQrCodeUrl(user.email, secret);
+
+    // Generate QR code
+    try {
+      return await QRCode.toDataURL(qrCodeURL);
+    } catch (e) {
+      return new Promise((resolve, reject) => reject(e));
+    }
+  }
+
+  async verify2faApp(userId, { token, password }) {
+    const user = await this.findById(userId);
+    if (!user) {
+      return new Promise((resolve, reject) => reject(new Error(404)));
+    }
+
+    // check if the password is correct
+    const isCorrect = await bcrypt.compare(password, user.password);
+    if (!isCorrect) {
+      return new Promise((resolve, reject) => reject(new Error(401)));
+    }
+
+    const user2FA = await db.User2fa.findOne({ where: { user_id: userId } });
+    if (!user2FA) {
+      return new Promise((resolve, reject) => reject({ error: "2FA not setup." }));
+    }
+
+    const totp = new TOTP({
+      secret: user2FA.secret
+    });
+
+    const delta = totp.validate({ token, window: 1 });
+    if (delta !== null) {
+      const backupCodes = [];
+      for (let i = 0; i < 10; i++) {
+        backupCodes.push(nanoid(8));
+      }
+      // Mark 2FA as enabled and add backup codes
+      await user2FA.update({ isEnabled: true, backup: JSON.stringify(backupCodes) });
+      return new Promise((resolve) => resolve(backupCodes));
+    } else {
+      return new Promise((resolve, reject) => reject({ error: "Invalid token." }));
+    }
+  }
+
+  get2faMethods(userId) {
+    return db.User2fa.findAll({
+      where: { user_id: userId, isEnabled: true },
+      attributes: { exclude: ["secret", "backup"] },
+    })
+      .then((methods) => {
+        return new Promise((resolve) => resolve(methods));
+      })
+      .catch((error) => {
+        return new Promise((resolve, reject) => reject(error));
+      });
+  }
+
+  async remove2faMethod(userId, methodId, password) {
+    const user = await this.findById(userId);
+
+    const isCorrect = await bcrypt.compare(password, user.password);
+    if (!isCorrect) {
+      return new Promise((resolve, reject) => reject(new Error(401)));
+    }
+
+    return db.User2fa.destroy({ where: { user_id: userId, id: methodId } })
+      .then(() => {
+        return new Promise((resolve) => resolve(true));
+      })
+      .catch((error) => {
+        return new Promise((resolve, reject) => reject(error));
+      });
+  }
+
+  validate2faToken(userId, token) {
+    const user2FA = db.User2fa.findOne({ where: { user_id: userId, isEnabled: true } });
+
+    if (!user2FA) {
+      return new Promise((resolve, reject) => reject(new Error(404)));
+    }
+
+    const totp = new TOTP({
+      secret: user2FA.secret
+    });
+
+    const delta = totp.validate({ token, window: 1 });
+
+    if (delta !== null) {
+      return this.findById(userId);
+    } else {
+      return new Promise((resolve, reject) => reject(new Error(401)));
+    }
+  }
+
+  async pinDashboard(projectId, userId) {
+    const project = await db.Project.findByPk(projectId);
+    if (!project) throw new Error("403");
+
+    const role = await db.TeamRole.findOne({
+      where: { team_id: project.team_id, user_id: userId },
+    });
+    const hasProjectAccess = role?.projects?.some((id) => `${id}` === `${project.id}`);
+    if (!role || (!["teamOwner", "teamAdmin"].includes(role.role) && !hasProjectAccess)) {
+      throw new Error("403");
+    }
+
+    return db.PinnedDashboard.create({
+      project_id: projectId,
+      user_id: userId,
+      team_id: project.team_id,
+    });
+  }
+
+  async unpinDashboard(pinId, userId) {
+    return db.PinnedDashboard.destroy({
+      where: {
+        id: pinId,
+        user_id: userId,
+      },
+    });
+  }
+
+  async getPinnedDashboards(userId) {
+    return db.PinnedDashboard.findAll({
+      where: { user_id: userId },
+    });
+  }
+}
+
+module.exports = UserController;

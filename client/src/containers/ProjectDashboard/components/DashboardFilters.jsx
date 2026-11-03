@@ -1,0 +1,476 @@
+import React, { useState } from "react"
+import PropTypes from "prop-types"
+import { Dropdown, Modal, Button } from "@heroui/react"
+import { LuArrowLeft, LuArrowRight, LuCircleMinus, LuCircleX, LuEllipsisVertical, LuIterationCw, LuPencil, LuTvMinimal, LuUsers } from "react-icons/lu"
+import { useDispatch, useSelector } from "react-redux"
+import toast from "react-hot-toast"
+
+import VariableFilter from "./VariableFilter"
+import DateRangeFilter from "./DateRangeFilter"
+import EditDateRangeFilter from "./EditDateRangeFilter"
+import EditVariableFilter from "./EditVariableFilter"
+import EditFieldFilter from "./EditFieldFilter"
+import FieldFilter from "./FieldFilter"
+import { selectCharts } from "../../../slices/chart"
+import { createDashboardFilter, deleteDashboardFilter, reorderDashboardFilters, selectProject, updateDashboardFilter } from "../../../slices/project"
+import canAccess from "../../../config/canAccess"
+import { selectUser } from "../../../slices/user"
+import { selectTeam } from "../../../slices/team"
+
+function DashboardFilters({ 
+  filters,
+  projectId, 
+  onRemoveFilter,
+  onApplyFilterValue,
+  onReorderFilters = () => {},
+  onReport = false,
+}) {
+  const [editingFilter, setEditingFilter] = useState(null);
+  const [filterToRemove, setFilterToRemove] = useState(null);
+
+  const charts = useSelector(selectCharts);
+  const user = useSelector(selectUser);
+  const team = useSelector(selectTeam);
+  const project = useSelector(selectProject);
+  const dashboardFilters = project?.DashboardFilters || [];
+  const projectFilters = filters?.[projectId] || []
+
+  const dispatch = useDispatch();
+
+  const _onApplyFilterValue = (filter, value) => {
+    if (onReport) {
+      onApplyFilterValue({
+        ...filters,
+        [projectId]: projectFilters.map((existingFilter) => (
+          existingFilter.id === filter.id ? { ...existingFilter, value } : existingFilter
+        )),
+      });
+      return;
+    }
+
+    const storedFilters = JSON.parse(window.localStorage.getItem("_cb_filters") || "{}");
+    const projectFilters = storedFilters[projectId] || [];
+    
+    const updatedFilters = projectFilters.map((f) => {
+      if (f.id === filter.id) {
+        return { ...f, value };
+      }
+      return f;
+    });
+
+    storedFilters[projectId] = updatedFilters;
+    window.localStorage.setItem("_cb_filters", JSON.stringify(storedFilters));
+
+    onApplyFilterValue(storedFilters);
+  }
+
+  const _handleDateRangeChange = (filter, dateRange) => {
+    const updatedFilter = {
+      ...filter,
+      ...dateRange,
+    };
+
+    const updatedFilters = {
+      ...filters,
+      [projectId]: filters[projectId].map(f => 
+        f.id === updatedFilter.id ? updatedFilter : f
+      ),
+    };
+
+    if (!onReport) {
+      window.localStorage.setItem("_cb_filters", JSON.stringify(updatedFilters));
+    }
+    onApplyFilterValue(updatedFilters);
+  }
+
+  const _handleFieldFilterChange = (newFilter) => {
+    const updatedFilters = {
+      ...filters,
+      [projectId]: filters[projectId].map(f => 
+        f.id === newFilter.id ? newFilter : f
+      ),
+    };
+
+    if (!onReport) {
+      window.localStorage.setItem("_cb_filters", JSON.stringify(updatedFilters));
+    }
+    onApplyFilterValue(updatedFilters);
+  };
+
+  const _handleEditFilter = (filter) => {
+    setEditingFilter(filter);
+  }
+
+  const _handleSaveFilter = () => {
+    if (!editingFilter) return;
+
+    const updatedFilters = {
+      ...filters,
+      [projectId]: filters[projectId].map(f => 
+        f.id === editingFilter.id ? editingFilter : f
+      ),
+    };
+
+    if (!onReport) {
+      window.localStorage.setItem("_cb_filters", JSON.stringify(updatedFilters));
+    }
+
+    onApplyFilterValue(updatedFilters);
+    setEditingFilter(null);
+  }
+
+  const _handleFilterChange = (newFilter) => {
+    setEditingFilter(newFilter);
+  };
+
+  const _onClearFilterValue = (filter) => {
+    const updatedFilters = {
+      ...filters,
+      [projectId]: filters[projectId].map(f => {
+        if (f.type === "date") {
+          return { ...f, startDate: "", endDate: "" };
+        }
+        return f.id === filter.id ? { ...f, value: "" } : f;
+      }),
+    };
+
+    if (!onReport) {
+      window.localStorage.setItem("_cb_filters", JSON.stringify(updatedFilters));
+    }
+    onApplyFilterValue(updatedFilters);
+  }
+
+  const _saveForEveryone = async (filter, onReport = false) => {
+    const response = await dispatch(createDashboardFilter({
+      project_id: projectId,
+      configuration: filter,
+      onReport,
+      dashboard_filter_id: filter.id,
+    }));
+
+    if (response.error) {
+      toast.error("Failed to save the filter for everyone. Please try again.");
+    } else {
+      toast.success("Filter saved for everyone successfully.");
+    }
+
+    return response;
+  };
+
+  const _updateReportVisibility = async (filter, onReport) => {
+    let response;
+    if (dashboardFilters.findIndex(f => f.id === filter.id) === -1) {
+      response = await _saveForEveryone(filter, onReport);
+    } else {
+      response = await dispatch(updateDashboardFilter({
+        project_id: projectId,
+        dashboard_filter_id: filter.id,
+        data: { onReport },
+      }));
+    }
+
+    if (response.error) {
+      toast.error("Failed to update the filter. Please try again.");
+    } else {
+      toast.success("Filter updated successfully.");
+    }
+  };
+
+  const _removeFromEveryone = async (filterId) => {
+    const response = await dispatch(deleteDashboardFilter({
+      project_id: projectId,
+      dashboard_filter_id: filterId,
+    }));
+
+    if (response.error) {
+      toast.error("Failed to remove the filter from everyone. Please try again.");
+    } else {
+      toast.success("Filter removed from everyone successfully.");
+    }
+  };
+
+  const _moveFilter = async (filterId, direction) => {
+    const currentIndex = projectFilters.findIndex((filter) => filter.id === filterId);
+    const nextIndex = currentIndex + direction;
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= projectFilters.length) return;
+
+    const nextFilters = [...projectFilters];
+    [nextFilters[currentIndex], nextFilters[nextIndex]] = [nextFilters[nextIndex], nextFilters[currentIndex]];
+    onReorderFilters(nextFilters);
+
+    const sharedFilterIds = new Set(dashboardFilters.map((filter) => filter.id));
+    const currentSharedOrder = projectFilters
+      .filter((filter) => sharedFilterIds.has(filter.id))
+      .map((filter) => filter.id);
+    const nextSharedOrder = nextFilters
+      .filter((filter) => sharedFilterIds.has(filter.id))
+      .map((filter) => filter.id);
+
+    if (JSON.stringify(currentSharedOrder) === JSON.stringify(nextSharedOrder)) return;
+
+    const response = await dispatch(reorderDashboardFilters({
+      project_id: projectId,
+      filterIds: nextSharedOrder,
+    }));
+    if (response.error) {
+      onReorderFilters(projectFilters);
+      toast.error("Failed to update the filter order. Please try again.");
+    }
+  };
+
+  const _getFieldOptions = () => {
+    const tempFieldOptions = [];
+    charts.map((chart) => {
+      if (chart.ChartDatasetConfigs) {
+        chart.ChartDatasetConfigs.forEach((cdc) => {
+          if (cdc.Dataset?.fieldsSchema) {
+            Object.keys(cdc.Dataset?.fieldsSchema).forEach((key) => {
+              const type = cdc.Dataset?.fieldsSchema[key];
+              if (tempFieldOptions.findIndex(f => f.key === key) !== -1) return;
+              tempFieldOptions.push({
+                key,
+                text: key && key.replace("root[].", "").replace("root.", ""),
+                value: key,
+                type,
+                chart_id: chart.id,
+                label: {
+                  content: type || "unknown",
+                  color: type === "date" ? "warning"
+                    : type === "number" ? "success"
+                      : type === "string" ? "primary"
+                        : type === "boolean" ? "warning"
+                          : "neutral"
+                },
+              });
+            });
+          }
+        });
+      }
+      return chart;
+    });
+
+    return tempFieldOptions;
+  };
+
+  const _getStateFilter = (filterId) => {
+    return dashboardFilters.find(f => f.id === filterId);
+  };
+
+  const _onRevertToServerDefault = (filter) => {
+    const stateFilter = _getStateFilter(filter.id);
+    
+    if (onReport) {
+      onApplyFilterValue({
+        ...filters,
+        [projectId]: projectFilters.map((existingFilter) => (
+          existingFilter.id === filter.id
+            ? { ...stateFilter.configuration, id: filter.id, onReport: stateFilter.onReport }
+            : existingFilter
+        )),
+      });
+      return;
+    }
+
+    const storedFilters = JSON.parse(window.localStorage.getItem("_cb_filters") || "{}");
+
+    if (storedFilters[project.id]) {
+      const filterIndex = storedFilters[project.id].findIndex(f => f.id === filter.id);
+      if (filterIndex !== -1) {
+        storedFilters[project.id][filterIndex] = {
+          ...stateFilter.configuration,
+          id: filter.id,
+          onReport: stateFilter.onReport
+        };
+        window.localStorage.setItem("_cb_filters", JSON.stringify(storedFilters));
+        onApplyFilterValue(storedFilters);
+      }
+    }
+  }
+
+  const _onRemoveFilter = (filterId, confirmed = false) => {
+    if (_getStateFilter(filterId) && !confirmed) {
+      setFilterToRemove(filterId);
+      return;
+    } else if (_getStateFilter(filterId) && confirmed) {
+      _removeFromEveryone(filterId);
+    }
+
+    onRemoveFilter(filterId);
+  }
+
+  const _canAccess = (role) => {
+    return canAccess(role, user.id, team.TeamRoles);
+  };
+
+  return (
+    <>
+      <div>
+        <div className="flex flex-row flex-wrap gap-1 min-w-min">
+          {projectFilters.map((filter) => (
+            <div className="flex flex-row items-center" key={filter.id}>
+              <div className="cursor-pointer flex flex-row gap-1 items-center">
+                {filter.type === "date" && (
+                  <DateRangeFilter
+                    startDate={filter.startDate}
+                    endDate={filter.endDate}
+                    label={filter.label || "Date range"}
+                    onChange={(dates) => _handleDateRangeChange(filter, dates)}
+                  />
+                )}
+                {filter.type === "field" && filter.field && (
+                  <FieldFilter filter={filter} onApply={(newFilter) => _handleFieldFilterChange(newFilter)} />
+                )}
+                {filter.type === "variable" && (
+                  <VariableFilter
+                    filter={filter}
+                    onApply={(value) => _onApplyFilterValue(filter, value)}
+                  />
+                )}
+              </div>
+              {!onReport && (
+                <Dropdown size="sm">
+                  <Dropdown.Trigger>
+                    <div className="cursor-pointer"><LuEllipsisVertical /></div>
+                  </Dropdown.Trigger>
+                  <Dropdown.Popover>
+                    <Dropdown.Menu>
+                      <Dropdown.Item id="edit-filter" onPress={() => _handleEditFilter(filter)} textValue="Edit filter">
+                        <LuPencil />
+                        Edit filter
+                      </Dropdown.Item>
+                      {_canAccess("projectEditor") && projectFilters.findIndex((item) => item.id === filter.id) > 0 && (
+                        <Dropdown.Item id="move-filter-earlier" onPress={() => _moveFilter(filter.id, -1)} textValue="Move filter earlier">
+                          <LuArrowLeft />
+                          Move earlier
+                        </Dropdown.Item>
+                      )}
+                      {_canAccess("projectEditor") && projectFilters.findIndex((item) => item.id === filter.id) < projectFilters.length - 1 && (
+                        <Dropdown.Item id="move-filter-later" onPress={() => _moveFilter(filter.id, 1)} textValue="Move filter later">
+                          <LuArrowRight />
+                          Move later
+                        </Dropdown.Item>
+                      )}
+                      {_canAccess("projectEditor") && dashboardFilters.findIndex(f => f.id === filter.id) === -1 && (
+                        <Dropdown.Item id="save-everyone" onPress={() => _saveForEveryone(filter)} textValue="Save for everyone">
+                          <LuUsers />
+                          Save for everyone
+                        </Dropdown.Item>
+                      )}
+                      {_canAccess("projectEditor") && dashboardFilters.findIndex(f => f.id === filter.id) !== -1 && (
+                        <Dropdown.Item id="remove-everyone" onPress={() => _removeFromEveryone(filter.id)} textValue="Remove from everyone">
+                          <LuUsers />
+                          Remove from everyone
+                        </Dropdown.Item>
+                      )}
+                      {_canAccess("projectEditor") && _getStateFilter(filter.id)?.onReport && (
+                        <Dropdown.Item id="hide-report" onPress={() => _updateReportVisibility(filter, false)} textValue="Hide from report">
+                          <LuTvMinimal />
+                          Hide from report
+                        </Dropdown.Item>
+                      )}
+                      {_canAccess("projectEditor") && !_getStateFilter(filter.id)?.onReport && (
+                        <Dropdown.Item id="show-report" onPress={() => _updateReportVisibility(filter, true)} textValue="Show on report">
+                          <LuTvMinimal />
+                          Show on report
+                        </Dropdown.Item>
+                      )}
+                      {_getStateFilter(filter.id) && (
+                        <Dropdown.Item id="revert-default" onPress={() => _onRevertToServerDefault(filter)} textValue="Revert to server default">
+                          <LuIterationCw />
+                          Revert to server default
+                        </Dropdown.Item>
+                      )}
+                      <Dropdown.Item id="clear-value" onPress={() => _onClearFilterValue(filter)} showDivider textValue="Clear filter value">
+                        <LuCircleMinus />
+                        Clear filter value
+                      </Dropdown.Item>
+                      <Dropdown.Item id="remove-filter" onPress={() => _onRemoveFilter(filter.id)} variant="danger" textValue="Remove filter">
+                        <LuCircleX className="text-danger" />
+                        Remove filter
+                      </Dropdown.Item>
+                    </Dropdown.Menu>
+                  </Dropdown.Popover>
+                </Dropdown>
+              )}
+              <div className="w-2" />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <Modal>
+        <Modal.Backdrop isOpen={!!editingFilter} onOpenChange={(nextOpen) => { if (!nextOpen) setEditingFilter(null); }}>
+          <Modal.Container>
+            <Modal.Dialog className="sm:max-w-2xl">
+              <Modal.Header>
+                <span className="font-bold text-lg">Edit filter</span>
+              </Modal.Header>
+              <Modal.Body className="p-1">
+                {editingFilter && editingFilter.type === "date" && (
+                  <EditDateRangeFilter
+                    charts={charts.filter(c => c.type !== "markdown")}
+                    filter={editingFilter}
+                    onChange={_handleFilterChange}
+                  />
+                )}
+                {editingFilter && editingFilter.type === "variable" && (
+                  <EditVariableFilter
+                    filter={editingFilter}
+                    onChange={_handleFilterChange}
+                    project={project}
+                  />
+                )}
+                {editingFilter && editingFilter.type === "field" && (
+                  <EditFieldFilter
+                    filter={editingFilter}
+                    onChange={_handleFilterChange}
+                    fieldOptions={_getFieldOptions()}
+                  />
+                )}
+              </Modal.Body>
+              <Modal.Footer>
+                <Button variant="secondary" onPress={() => setEditingFilter(null)}>
+                  Cancel
+                </Button>
+                <Button variant="primary" onPress={_handleSaveFilter}>
+                  Save changes
+                </Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+
+      <Modal>
+        <Modal.Backdrop isOpen={!!filterToRemove} onOpenChange={(nextOpen) => { if (!nextOpen) setFilterToRemove(null); }}>
+          <Modal.Container>
+            <Modal.Dialog className="sm:max-w-2xl">
+              <Modal.Header>
+            <span className="font-bold">Remove filter</span>
+              </Modal.Header>
+              <Modal.Body>
+            <p>{"Removing this filter will remove it from everyone's dashboard."}</p>
+            <p>{"If you want to remove it from your dashboard only, you can clear the filter value instead."}</p>
+              </Modal.Body>
+              <Modal.Footer>
+            <Button variant="secondary" onPress={() => setFilterToRemove(null)}>Cancel</Button>
+            <Button variant="danger" onPress={() => _onRemoveFilter(filterToRemove, true)}>Remove from everyone</Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+    </>
+  )
+}
+
+DashboardFilters.propTypes = {
+  filters: PropTypes.object.isRequired,
+  projectId: PropTypes.number.isRequired,
+  onRemoveFilter: PropTypes.func.isRequired,
+  onApplyFilterValue: PropTypes.func.isRequired,
+  onReorderFilters: PropTypes.func,
+  onReport: PropTypes.bool,
+}
+
+export default DashboardFilters

@@ -1,0 +1,8 @@
+*.DS_Store*
+.idea/
+node_modules
+docs/.vuepress/dist
+.env*
+*.env
+!.env-template
+

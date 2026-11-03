@@ -1,0 +1,824 @@
+import {
+  beforeAll, beforeEach, describe, expect, it, vi
+} from "vitest";
+import request from "supertest";
+import { createRequire } from "module";
+import crypto from "crypto";
+import fs from "fs/promises";
+import os from "os";
+import path from "path";
+
+import { createTestApp } from "../helpers/testApp.js";
+import { testDbManager } from "../helpers/testDbManager.js";
+import { getModels } from "../helpers/dbHelpers.js";
+import { generateTestToken } from "../helpers/authHelpers.js";
+import { userFactory } from "../factories/userFactory.js";
+import { teamFactory } from "../factories/teamFactory.js";
+import { projectFactory } from "../factories/projectFactory.js";
+import { connectionFactory } from "../factories/connectionFactory.js";
+
+const require = createRequire(import.meta.url);
+const ConnectionController = require("../../controllers/ConnectionController.js");
+const CustomerioConnection = require("../../sources/plugins/customerio/customerio.connection.js");
+const { getSourceById } = require("../../sources");
+const { CONNECTION_FILES_DIRECTORY } = require("../../modules/connectionFiles.js");
+
+async function seedProjectScopedAccess(models) {
+  const user = await models.User.create(userFactory.build());
+  const team = await models.Team.create(teamFactory.build());
+  const allowedProject = await models.Project.create(projectFactory.build({
+    team_id: team.id,
+    ghost: false,
+  }));
+  const restrictedProject = await models.Project.create(projectFactory.build({
+    team_id: team.id,
+    ghost: false,
+  }));
+
+  await models.TeamRole.create({
+    team_id: team.id,
+    user_id: user.id,
+    role: "projectEditor",
+    projects: [allowedProject.id],
+  });
+
+  const allowedCustomerioConnection = await models.Connection.create(connectionFactory.build({
+    team_id: team.id,
+    project_ids: [allowedProject.id],
+    type: "customerio",
+    subType: "customerio",
+    host: "us",
+    password: "allowed-token",
+  }));
+
+  const restrictedCustomerioConnection = await models.Connection.create(connectionFactory.build({
+    team_id: team.id,
+    project_ids: [restrictedProject.id],
+    type: "customerio",
+    subType: "customerio",
+    host: "us",
+    password: "restricted-token",
+  }));
+
+  const allowedApiConnection = await models.Connection.create(connectionFactory.build({
+    team_id: team.id,
+    project_ids: [allowedProject.id],
+    type: "api",
+    subType: "rest",
+    host: "https://allowed.example.com",
+    options: JSON.stringify([{ Authorization: "Bearer allowed-api-token" }]),
+  }));
+
+  const allowedStripeConnection = await models.Connection.create(connectionFactory.build({
+    team_id: team.id,
+    project_ids: [allowedProject.id],
+    type: "api",
+    subType: "stripe",
+    host: "https://api.stripe.com/v1",
+    options: JSON.stringify([{ Authorization: "Bearer allowed-stripe-token" }]),
+  }));
+
+  const allowedStrapiConnection = await models.Connection.create(connectionFactory.build({
+    team_id: team.id,
+    project_ids: [allowedProject.id],
+    type: "api",
+    subType: "strapi",
+    host: "https://cms.example.com/api",
+    options: JSON.stringify([{ Authorization: "Bearer allowed-strapi-token" }]),
+  }));
+
+  const allowedMongoConnection = await models.Connection.create(connectionFactory.buildMongoDB({
+    team_id: team.id,
+    project_ids: [allowedProject.id],
+    subType: "mongodb",
+    connectionString: "mongodb://user:pass@mongo.example.com:27017/app",
+  }));
+
+  const allowedJiraConnection = await models.Connection.create(connectionFactory.build({
+    team_id: team.id,
+    project_ids: [allowedProject.id],
+    type: "jira",
+    subType: "jira",
+    host: "https://chartbrew.atlassian.net",
+    authentication: JSON.stringify({
+      type: "api_token",
+      email: "raz@example.com",
+      apiToken: "jira-token",
+    }),
+  }));
+
+  const restrictedApiConnection = await models.Connection.create(connectionFactory.build({
+    team_id: team.id,
+    project_ids: [restrictedProject.id],
+    type: "api",
+    subType: "rest",
+    host: "https://restricted.example.com",
+    options: JSON.stringify([{ Authorization: "Bearer restricted-api-token" }]),
+  }));
+
+  return {
+    team,
+    user,
+    token: generateTestToken({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+    }),
+    connections: {
+      allowedCustomerioConnection,
+      restrictedCustomerioConnection,
+      allowedApiConnection,
+      allowedStripeConnection,
+      allowedStrapiConnection,
+      allowedMongoConnection,
+      allowedJiraConnection,
+      restrictedApiConnection,
+    },
+  };
+}
+
+async function seedTeamAdminAccess(models) {
+  const user = await models.User.create(userFactory.build());
+  const team = await models.Team.create(teamFactory.build());
+
+  await models.TeamRole.create({
+    team_id: team.id,
+    user_id: user.id,
+    role: "teamAdmin",
+  });
+
+  return {
+    team,
+    user,
+    token: generateTestToken({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+    }),
+  };
+}
+
+describe("ConnectionRoute project scoping", () => {
+  let app;
+  let models;
+
+  beforeAll(async () => {
+    if (!testDbManager.getSequelize()) {
+      await testDbManager.start();
+    }
+
+    app = await createTestApp();
+    const connectionRoute = require("../../api/ConnectionRoute.js");
+    connectionRoute(app);
+    models = await getModels();
+  });
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.stubEnv("CB_DISABLED_SERVER_SOURCES", "");
+  });
+
+  it("allows source actions for connections assigned to the caller's project", async () => {
+    const seeded = await seedProjectScopedAccess(models);
+    const actionSpy = vi.spyOn(CustomerioConnection, "getAllSegments")
+      .mockResolvedValue({ ok: true });
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections/${seeded.connections.allowedCustomerioConnection.id}/source-action`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({ action: "getAllSegments" })
+      .expect(200);
+
+    expect(response.body).toEqual({ ok: true });
+    expect(actionSpy).toHaveBeenCalledWith(expect.objectContaining({
+      id: seeded.connections.allowedCustomerioConnection.id,
+    }));
+  });
+
+  it("rejects source actions that are not exposed by the source plugin", async () => {
+    const seeded = await seedProjectScopedAccess(models);
+    const internalSpy = vi.spyOn(CustomerioConnection, "getConnectionOpt");
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections/${seeded.connections.allowedCustomerioConnection.id}/source-action`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({
+        action: "getConnectionOpt",
+        params: { method: "GET", route: "segments?limit=1" },
+      })
+      .expect(400);
+
+    expect(response.body).toEqual({ error: "Unsupported source action" });
+    expect(internalSpy).not.toHaveBeenCalled();
+  });
+
+  it("allows Jira source actions for connections assigned to the caller's project", async () => {
+    const seeded = await seedProjectScopedAccess(models);
+    const jiraSource = getSourceById("jira");
+    const actionSpy = vi.spyOn(jiraSource.backend.actions, "listProjects")
+      .mockResolvedValue([{ id: "10000", key: "CHART", name: "Chartbrew" }]);
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections/${seeded.connections.allowedJiraConnection.id}/source-action`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({ action: "listProjects" })
+      .expect(200);
+
+    expect(response.body).toEqual([{ id: "10000", key: "CHART", name: "Chartbrew" }]);
+    expect(actionSpy).toHaveBeenCalledWith(expect.objectContaining({
+      connection: expect.objectContaining({
+        id: seeded.connections.allowedJiraConnection.id,
+        type: "jira",
+      }),
+      params: {},
+    }));
+  });
+
+  it("rejects source actions for same-team connections outside the caller's projects", async () => {
+    const seeded = await seedProjectScopedAccess(models);
+    const actionSpy = vi.spyOn(CustomerioConnection, "getAllSegments")
+      .mockResolvedValue({ ok: true });
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections/${seeded.connections.restrictedCustomerioConnection.id}/source-action`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({ action: "getAllSegments" })
+      .expect(403);
+
+    expect(response.body).toEqual({ error: "Not authorized" });
+    expect(actionSpy).not.toHaveBeenCalled();
+  });
+
+  it("runs apiTest through the generic API source preview hook", async () => {
+    const seeded = await seedProjectScopedAccess(models);
+    const apiSource = getSourceById("api");
+    const previewSpy = vi.spyOn(apiSource.backend, "previewDataRequest")
+      .mockResolvedValue({ responseData: { data: [{ id: 1 }] } });
+    const apiTestSpy = vi.spyOn(ConnectionController.prototype, "testApiRequest");
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections/${seeded.connections.allowedApiConnection.id}/apiTest`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({
+        dataRequest: {
+          route: "/v1/customers?limit=5",
+          method: "GET",
+          useGlobalHeaders: true,
+        },
+      })
+      .expect(200);
+
+    expect(response.body).toEqual({ responseData: { data: [{ id: 1 }] } });
+    expect(previewSpy).toHaveBeenCalledWith(expect.objectContaining({
+      connection: expect.objectContaining({
+        id: seeded.connections.allowedApiConnection.id,
+        type: "api",
+      }),
+      dataRequest: {
+        route: "/v1/customers?limit=5",
+        method: "GET",
+        useGlobalHeaders: true,
+      },
+    }));
+    expect(apiTestSpy).not.toHaveBeenCalled();
+  });
+
+  it("runs apiTest through source preview hooks for migrated API sources", async () => {
+    const seeded = await seedProjectScopedAccess(models);
+    const stripeSource = getSourceById("stripe");
+    const previewSpy = vi.spyOn(stripeSource.backend, "previewDataRequest")
+      .mockResolvedValue({ responseData: { data: [{ id: "txn_1" }] } });
+    const apiTestSpy = vi.spyOn(ConnectionController.prototype, "testApiRequest");
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections/${seeded.connections.allowedStripeConnection.id}/apiTest`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({
+        dataRequest: {
+          route: "/charges?limit=5",
+          method: "GET",
+          useGlobalHeaders: true,
+        },
+        itemsLimit: 100,
+        items: "data",
+        offset: "starting_after",
+        pagination: true,
+      })
+      .expect(200);
+
+    expect(response.body).toEqual({ responseData: { data: [{ id: "txn_1" }] } });
+    expect(previewSpy).toHaveBeenCalledWith(expect.objectContaining({
+      connection: expect.objectContaining({
+        id: seeded.connections.allowedStripeConnection.id,
+        subType: "stripe",
+      }),
+      dataRequest: {
+        route: "/charges?limit=5",
+        method: "GET",
+        useGlobalHeaders: true,
+      },
+    }));
+    expect(apiTestSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects apiTest for server-disabled source plugins", async () => {
+    const seeded = await seedProjectScopedAccess(models);
+    const stripeSource = getSourceById("stripe");
+    const previewSpy = vi.spyOn(stripeSource.backend, "previewDataRequest")
+      .mockResolvedValue({ responseData: { data: [{ id: "txn_1" }] } });
+    const apiTestSpy = vi.spyOn(ConnectionController.prototype, "testApiRequest");
+
+    vi.stubEnv("CB_DISABLED_SERVER_SOURCES", "stripe");
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections/${seeded.connections.allowedStripeConnection.id}/apiTest`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({
+        dataRequest: {
+          method: "GET",
+          route: "/balance_transactions",
+        },
+        itemsLimit: 10,
+        items: "data",
+        pagination: true,
+      })
+      .expect(400);
+
+    expect(response.body).toEqual({
+      code: "SOURCE_DISABLED",
+      sourceId: "stripe",
+      message: "Stripe Legacy is disabled on this server.",
+    });
+    expect(previewSpy).not.toHaveBeenCalled();
+    expect(apiTestSpy).not.toHaveBeenCalled();
+  });
+
+  it("runs apiTest through the Strapi source preview hook", async () => {
+    const seeded = await seedProjectScopedAccess(models);
+    const strapiSource = getSourceById("strapi");
+    const previewSpy = vi.spyOn(strapiSource.backend, "previewDataRequest")
+      .mockResolvedValue({ responseData: { data: [{ id: 1, title: "Post" }] } });
+    const apiTestSpy = vi.spyOn(ConnectionController.prototype, "testApiRequest");
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections/${seeded.connections.allowedStrapiConnection.id}/apiTest`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({
+        dataRequest: {
+          route: "/posts?pagination[pageSize]=5",
+          method: "GET",
+          useGlobalHeaders: true,
+        },
+      })
+      .expect(200);
+
+    expect(response.body).toEqual({ responseData: { data: [{ id: 1, title: "Post" }] } });
+    expect(previewSpy).toHaveBeenCalledWith(expect.objectContaining({
+      connection: expect.objectContaining({
+        id: seeded.connections.allowedStrapiConnection.id,
+        subType: "strapi",
+      }),
+      dataRequest: {
+        route: "/posts?pagination[pageSize]=5",
+        method: "GET",
+        useGlobalHeaders: true,
+      },
+    }));
+    expect(apiTestSpy).not.toHaveBeenCalled();
+  });
+
+  it("runs apiTest through the MongoDB source preview hook", async () => {
+    const seeded = await seedProjectScopedAccess(models);
+    const mongoSource = getSourceById("mongodb");
+    const previewSpy = vi.spyOn(mongoSource.backend, "previewDataRequest")
+      .mockResolvedValue({ responseData: { data: [{ total: 12 }] } });
+    const apiTestSpy = vi.spyOn(ConnectionController.prototype, "testApiRequest");
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections/${seeded.connections.allowedMongoConnection.id}/apiTest`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({
+        dataRequest: {
+          query: "collection('users').countDocuments({})",
+        },
+      })
+      .expect(200);
+
+    expect(response.body).toEqual({ responseData: { data: [{ total: 12 }] } });
+    expect(previewSpy).toHaveBeenCalledWith(expect.objectContaining({
+      connection: expect.objectContaining({
+        id: seeded.connections.allowedMongoConnection.id,
+        type: "mongodb",
+      }),
+      dataRequest: {
+        query: "collection('users').countDocuments({})",
+      },
+    }));
+    expect(apiTestSpy).not.toHaveBeenCalled();
+  });
+
+  it("uses the connection test route type when the MongoDB payload omits type", async () => {
+    const seeded = await seedProjectScopedAccess(models);
+    const mongoSource = getSourceById("mongodb");
+    const testSpy = vi.spyOn(mongoSource.backend, "testUnsavedConnection")
+      .mockResolvedValue({ success: true, collections: [] });
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections/mongodb/test`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({
+        connectionString: "mongodb://user:pass@mongo.example.com:27017/app",
+      })
+      .expect(200);
+
+    expect(response.body).toEqual({ success: true, collections: [] });
+    expect(testSpy).toHaveBeenCalledWith(expect.objectContaining({
+      connection: expect.objectContaining({
+        type: "mongodb",
+        connectionString: "mongodb://user:pass@mongo.example.com:27017/app",
+      }),
+    }));
+  });
+
+  it("rejects apiTest for same-team connections outside the caller's projects", async () => {
+    const seeded = await seedProjectScopedAccess(models);
+    const apiTestSpy = vi.spyOn(ConnectionController.prototype, "testApiRequest")
+      .mockResolvedValue({ responseData: { data: [{ id: 1 }] } });
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections/${seeded.connections.restrictedApiConnection.id}/apiTest`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({
+        dataRequest: {
+          route: "/v1/customers?limit=5",
+          method: "GET",
+          useGlobalHeaders: true,
+        },
+      })
+      .expect(403);
+
+    expect(response.body).toEqual({ error: "Not authorized" });
+    expect(apiTestSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not allow team admins to set private-host access when creating API connections", async () => {
+    const seeded = await seedTeamAdminAccess(models);
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({
+        type: "api",
+        subType: "api",
+        name: "internal probe",
+        host: "http://192.168.1.100:8080",
+        team_id: seeded.team.id,
+        allowPrivateHost: true,
+      })
+      .expect(200);
+
+    const savedConnection = await models.Connection.findByPk(response.body.id);
+
+    expect(savedConnection.allowPrivateHost).toBeNull();
+    expect(response.body.allowPrivateHost).toBeNull();
+  });
+
+  it("does not allow team admins to enable private-host access when updating API connections", async () => {
+    const seeded = await seedTeamAdminAccess(models);
+    const connection = await models.Connection.create(connectionFactory.build({
+      team_id: seeded.team.id,
+      type: "api",
+      subType: "api",
+      host: "https://api.example.com",
+      allowPrivateHost: null,
+    }));
+
+    const response = await request(app)
+      .put(`/team/${seeded.team.id}/connections/${connection.id}`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({
+        name: "updated probe",
+        allowPrivateHost: true,
+      })
+      .expect(200);
+
+    const savedConnection = await models.Connection.findByPk(connection.id);
+
+    expect(savedConnection.allowPrivateHost).toBeNull();
+    expect(response.body.allowPrivateHost).toBeNull();
+  });
+
+  it("preserves existing SSH secrets when an update payload sends empty values", async () => {
+    const seeded = await seedTeamAdminAccess(models);
+    const connection = await models.Connection.create(connectionFactory.build({
+      team_id: seeded.team.id,
+      type: "postgres",
+      subType: "postgres",
+      useSsh: true,
+      sshHost: "ssh.example.com",
+      sshUsername: "deploy",
+      sshPassword: "existing-password",
+      sshPrivateKey: ".connectionFiles/existing-key",
+      sshPassphrase: "existing-passphrase",
+    }));
+
+    await request(app)
+      .put(`/team/${seeded.team.id}/connections/${connection.id}`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({
+        name: "updated ssh connection",
+        sshPassword: "",
+        sshPrivateKey: null,
+        sshPassphrase: "",
+      })
+      .expect(200);
+
+    const savedConnection = await models.Connection.findByPk(connection.id);
+
+    expect(savedConnection.name).toBe("updated ssh connection");
+    expect(savedConnection.sshPassword).toBe("existing-password");
+    expect(savedConnection.sshPrivateKey).toBe(".connectionFiles/existing-key");
+    expect(savedConnection.sshPassphrase).toBe("existing-passphrase");
+  });
+
+  it("stores SSH connection fields encrypted at rest while reading plaintext through the model", async () => {
+    const seeded = await seedTeamAdminAccess(models);
+    const connection = await models.Connection.create(connectionFactory.build({
+      team_id: seeded.team.id,
+      type: "postgres",
+      subType: "postgres",
+      useSsh: true,
+      sshHost: "ssh.example.com",
+      sshUsername: "deploy",
+      sshPassword: "ssh-password",
+      sshPrivateKey: ".connectionFiles/private-key",
+      sshPassphrase: "key-passphrase",
+      sshJumpHost: "bastion.example.com",
+    }));
+
+    const queryGenerator = models.sequelize.getQueryInterface().queryGenerator;
+    const connectionTable = queryGenerator.quoteTable("Connection");
+    const idColumn = queryGenerator.quoteIdentifier("id");
+    const sshColumns = [
+      "sshHost",
+      "sshUsername",
+      "sshPassword",
+      "sshPrivateKey",
+      "sshPassphrase",
+      "sshJumpHost",
+    ].map((field) => queryGenerator.quoteIdentifier(field)).join(", ");
+
+    const [rawConnection] = await models.sequelize.query(
+      `SELECT ${sshColumns} FROM ${connectionTable} WHERE ${idColumn} = :id`,
+      {
+        replacements: { id: connection.id },
+        type: models.sequelize.QueryTypes.SELECT,
+      }
+    );
+    const savedConnection = await models.Connection.findByPk(connection.id);
+
+    expect(savedConnection.sshHost).toBe("ssh.example.com");
+    expect(savedConnection.sshUsername).toBe("deploy");
+    expect(savedConnection.sshPassword).toBe("ssh-password");
+    expect(savedConnection.sshPrivateKey).toBe(".connectionFiles/private-key");
+    expect(savedConnection.sshPassphrase).toBe("key-passphrase");
+    expect(savedConnection.sshJumpHost).toBe("bastion.example.com");
+
+    expect(rawConnection.sshHost).not.toBe("ssh.example.com");
+    expect(rawConnection.sshUsername).not.toBe("deploy");
+    expect(rawConnection.sshPassword).not.toBe("ssh-password");
+    expect(rawConnection.sshPrivateKey).not.toBe(".connectionFiles/private-key");
+    expect(rawConnection.sshPassphrase).not.toBe("key-passphrase");
+    expect(rawConnection.sshJumpHost).not.toBe("bastion.example.com");
+  });
+
+  it("redacts SSH secrets from connection API responses while exposing presence flags", async () => {
+    const seeded = await seedTeamAdminAccess(models);
+    const connection = await models.Connection.create(connectionFactory.build({
+      team_id: seeded.team.id,
+      type: "postgres",
+      subType: "postgres",
+      useSsh: true,
+      sshHost: "ssh.example.com",
+      sshUsername: "deploy",
+      sshPassword: "ssh-password",
+      sshPrivateKey: ".connectionFiles/private-key",
+      sshPassphrase: "key-passphrase",
+    }));
+
+    const getResponse = await request(app)
+      .get(`/team/${seeded.team.id}/connections/${connection.id}`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .expect(200);
+
+    expect(getResponse.body).not.toHaveProperty("sshPassword");
+    expect(getResponse.body).not.toHaveProperty("sshPrivateKey");
+    expect(getResponse.body).not.toHaveProperty("sshPassphrase");
+    expect(getResponse.body.hasSshPassword).toBe(true);
+    expect(getResponse.body.hasSshPrivateKey).toBe(true);
+    expect(getResponse.body.hasSshPassphrase).toBe(true);
+
+    const listResponse = await request(app)
+      .get(`/team/${seeded.team.id}/connections`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .expect(200);
+    const listedConnection = listResponse.body.find((item) => item.id === connection.id);
+
+    expect(listedConnection).toBeDefined();
+    expect(listedConnection).not.toHaveProperty("sshPassword");
+    expect(listedConnection).not.toHaveProperty("sshPrivateKey");
+    expect(listedConnection).not.toHaveProperty("sshPassphrase");
+    expect(listedConnection.hasSshPassword).toBe(true);
+    expect(listedConnection.hasSshPrivateKey).toBe(true);
+    expect(listedConnection.hasSshPassphrase).toBe(true);
+  });
+
+  it("ignores attacker-controlled certificate paths in JSON writes", async () => {
+    const seeded = await seedTeamAdminAccess(models);
+    const markerPath = path.join(os.tmpdir(), `chartbrew-connection-marker-${crypto.randomUUID()}`);
+    await fs.writeFile(markerPath, "do not delete");
+
+    try {
+      const createResponse = await request(app)
+        .post(`/team/${seeded.team.id}/connections`)
+        .set("Authorization", `Bearer ${seeded.token}`)
+        .send({
+          name: "Path injection connection",
+          type: "api",
+          subType: "rest",
+          host: "https://api.example.com",
+          sslCa: markerPath,
+          sslCert: markerPath,
+          sslKey: markerPath,
+          sshPrivateKey: markerPath,
+        })
+        .expect(200);
+
+      let savedConnection = await models.Connection.findByPk(createResponse.body.id);
+      expect(savedConnection.sslCa).toBeNull();
+      expect(savedConnection.sslCert).toBeNull();
+      expect(savedConnection.sslKey).toBeNull();
+      expect(savedConnection.sshPrivateKey).toBeNull();
+
+      await request(app)
+        .put(`/team/${seeded.team.id}/connections/${savedConnection.id}`)
+        .set("Authorization", `Bearer ${seeded.token}`)
+        .send({ sslCa: markerPath, sshPrivateKey: markerPath })
+        .expect(200);
+
+      savedConnection = await models.Connection.findByPk(savedConnection.id);
+      expect(savedConnection.sslCa).toBeNull();
+      expect(savedConnection.sshPrivateKey).toBeNull();
+
+      await request(app)
+        .delete(`/team/${seeded.team.id}/connections/${savedConnection.id}`)
+        .set("Authorization", `Bearer ${seeded.token}`)
+        .expect(200);
+
+      expect(await fs.readFile(markerPath, "utf8")).toBe("do not delete");
+    } finally {
+      await fs.rm(markerPath, { force: true });
+    }
+  });
+
+  it("does not delete unmanaged paths stored before the security fix", async () => {
+    const seeded = await seedTeamAdminAccess(models);
+    const markerPath = path.join(os.tmpdir(), `chartbrew-legacy-marker-${crypto.randomUUID()}`);
+    await fs.writeFile(markerPath, "legacy row must not delete this");
+
+    try {
+      const connection = await models.Connection.create(connectionFactory.build({
+        team_id: seeded.team.id,
+        sslCa: markerPath,
+        sshPrivateKey: markerPath,
+      }));
+
+      await request(app)
+        .delete(`/team/${seeded.team.id}/connections/${connection.id}`)
+        .set("Authorization", `Bearer ${seeded.token}`)
+        .expect(200);
+
+      expect(await fs.readFile(markerPath, "utf8")).toBe("legacy row must not delete this");
+    } finally {
+      await fs.rm(markerPath, { force: true });
+    }
+  });
+
+  it("forces new connections to belong to the team in the route", async () => {
+    const seeded = await seedTeamAdminAccess(models);
+    const otherTeam = await models.Team.create(teamFactory.build());
+
+    const response = await request(app)
+      .post(`/team/${seeded.team.id}/connections`)
+      .set("Authorization", `Bearer ${seeded.token}`)
+      .send({
+        name: "Team-bound connection",
+        type: "api",
+        subType: "rest",
+        host: "https://api.example.com",
+        team_id: otherTeam.id,
+      })
+      .expect(200);
+
+    expect(response.body.team_id).toBe(seeded.team.id);
+  });
+
+  it("deletes legitimate managed connection files", async () => {
+    const seeded = await seedTeamAdminAccess(models);
+    const storedPath = path.join(".connectionFiles", crypto.randomBytes(16).toString("hex"));
+    const absolutePath = path.resolve(storedPath);
+    await fs.mkdir(CONNECTION_FILES_DIRECTORY, { recursive: true });
+    await fs.writeFile(absolutePath, "managed certificate");
+
+    try {
+      const connection = await models.Connection.create(connectionFactory.build({
+        team_id: seeded.team.id,
+        sslCa: storedPath,
+      }));
+
+      await request(app)
+        .delete(`/team/${seeded.team.id}/connections/${connection.id}`)
+        .set("Authorization", `Bearer ${seeded.token}`)
+        .expect(200);
+
+      await expect(fs.access(absolutePath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await fs.rm(absolutePath, { force: true });
+    }
+  });
+
+  it("duplicates managed connection files without sharing their lifecycle", async () => {
+    const seeded = await seedTeamAdminAccess(models);
+    const originalPath = path.join(".connectionFiles", crypto.randomBytes(16).toString("hex"));
+    const originalAbsolutePath = path.resolve(originalPath);
+    let duplicatePath;
+    await fs.mkdir(CONNECTION_FILES_DIRECTORY, { recursive: true });
+    await fs.writeFile(originalAbsolutePath, "encrypted certificate contents");
+
+    try {
+      const originalConnection = await models.Connection.create(connectionFactory.build({
+        team_id: seeded.team.id,
+        sslCa: originalPath,
+      }));
+
+      const duplicateResponse = await request(app)
+        .post(`/team/${seeded.team.id}/connections/${originalConnection.id}/duplicate`)
+        .set("Authorization", `Bearer ${seeded.token}`)
+        .send({ name: "Independent duplicate" })
+        .expect(200);
+      const duplicateConnection = await models.Connection.findByPk(duplicateResponse.body.id);
+      duplicatePath = duplicateConnection.sslCa;
+
+      expect(duplicatePath).not.toBe(originalPath);
+      expect(await fs.readFile(path.resolve(duplicatePath), "utf8"))
+        .toBe("encrypted certificate contents");
+
+      await request(app)
+        .delete(`/team/${seeded.team.id}/connections/${duplicateConnection.id}`)
+        .set("Authorization", `Bearer ${seeded.token}`)
+        .expect(200);
+
+      expect(await fs.readFile(originalAbsolutePath, "utf8"))
+        .toBe("encrypted certificate contents");
+      await expect(fs.access(path.resolve(duplicatePath))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await fs.rm(originalAbsolutePath, { force: true });
+      if (duplicatePath) await fs.rm(path.resolve(duplicatePath), { force: true });
+    }
+  });
+
+  it("preserves managed files still referenced by historical duplicates", async () => {
+    const seeded = await seedTeamAdminAccess(models);
+    const sharedPath = path.join(".connectionFiles", crypto.randomBytes(16).toString("hex"));
+    const sharedAbsolutePath = path.resolve(sharedPath);
+    await fs.mkdir(CONNECTION_FILES_DIRECTORY, { recursive: true });
+    await fs.writeFile(sharedAbsolutePath, "shared legacy certificate");
+
+    try {
+      const firstConnection = await models.Connection.create(connectionFactory.build({
+        team_id: seeded.team.id,
+        sslCa: sharedPath,
+      }));
+      const secondConnection = await models.Connection.create(connectionFactory.build({
+        team_id: seeded.team.id,
+        sslCa: sharedPath,
+      }));
+
+      await request(app)
+        .delete(`/team/${seeded.team.id}/connections/${firstConnection.id}`)
+        .set("Authorization", `Bearer ${seeded.token}`)
+        .expect(200);
+
+      expect(await fs.readFile(sharedAbsolutePath, "utf8")).toBe("shared legacy certificate");
+
+      await request(app)
+        .delete(`/team/${seeded.team.id}/connections/${secondConnection.id}`)
+        .set("Authorization", `Bearer ${seeded.token}`)
+        .expect(200);
+
+      await expect(fs.access(sharedAbsolutePath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await fs.rm(sharedAbsolutePath, { force: true });
+    }
+  });
+});

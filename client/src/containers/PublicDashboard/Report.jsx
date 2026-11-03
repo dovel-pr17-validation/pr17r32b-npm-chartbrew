@@ -1,0 +1,1147 @@
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { Link as LinkDom, useParams, useSearchParams } from "react-router";
+import PropTypes from "prop-types";
+import {
+  Button, Input, Tooltip, Popover, Separator, Modal,
+  Link, ProgressCircle, Chip,
+  Spinner,
+  Form,
+  Label,
+  TextField,
+} from "@heroui/react";
+import { useDispatch, useSelector } from "react-redux";
+import { Helmet } from "react-helmet-async";
+import { clone } from "lodash";
+import { useDropzone } from "react-dropzone";
+import toast from "react-hot-toast";
+import {
+  LuSquareArrowLeft,
+  LuCircleCheck, LuChevronLeft, LuEye, LuImagePlus, LuPalette,
+  LuRefreshCw, LuShare, LuCircleX,
+  LuClipboardPen,
+  LuListFilter,
+} from "react-icons/lu";
+import { WidthProvider, Responsive } from "react-grid-layout";
+import "react-grid-layout/css/styles.css";
+import "react-resizable/css/styles.css";
+
+import AceEditor from "../../components/CodeEditor";
+
+import {
+  getReport, getProject, updateProject, updateProjectLogo,
+} from "../../slices/project";
+import { selectTeams } from "../../slices/team";
+import {
+  runQueryOnPublic, runQueryWithFilters, selectCharts, shouldSkipFiltering
+} from "../../slices/chart";
+import { blue, primary, secondary } from "../../config/colors";
+import Chart from "../Chart/Chart";
+import logo from "../../assets/logo_inverted.png";
+import { API_HOST } from "../../config/settings";
+import canAccess from "../../config/canAccess";
+import SharingSettings from "./components/SharingSettings";
+import instructionDashboard from "../../assets/instruction-dashboard-report.png";
+import Text from "../../components/Text";
+import Row from "../../components/Row";
+import { ButtonSpinner } from "../../components/ButtonSpinner";
+import Container from "../../components/Container";
+import { useTheme } from "../../modules/ThemeContext";
+import TextWidget from "../Chart/TextWidget";
+import { cols, margin, widthSize } from "../../modules/layoutBreakpoints";
+import { selectUser } from "../../slices/user";
+import DashboardFilters from "../ProjectDashboard/components/DashboardFilters";
+import useInterval from "../../modules/useInterval";
+import { buildChartRuntimeRequest } from "../../modules/chartRuntimeFilters";
+import ColorPickerControl from "../../components/ColorPickerControl";
+
+const ResponsiveGridLayout = WidthProvider(Responsive, { measureBeforeMount: true });
+
+const defaultColors = [
+  "#FFFFFF", "#000000", "#D9E3F0", "#F47373", "#697689", "#37D67A", primary, secondary, blue,
+  "#2CCCE4", "#555555", "#dce775", "#ff8a65", "#ba68c8",
+];
+
+const PUBLIC_REPORT_CACHE_REFRESH_INTERVAL = 10 * 60 * 1000;
+
+function Report({ editMode = false }) {
+  const [project, setProject] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [editorVisible, setEditorVisible] = useState(false);
+  const [isSaved, setIsSaved] = useState(true);
+  const [saveLoading, setSaveLoading] = useState(false);
+  const [newChanges, setNewChanges] = useState({
+    backgroundColor: "#FFFFFF",
+    titleColor: "#000000",
+  });
+  const [logoPreview, setLogoPreview] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [noCharts, setNoCharts] = useState(false);
+  const [preview, setPreview] = useState(false);
+  const [passwordRequired, setPasswordRequired] = useState(false);
+  const [notAuthorized, setNotAuthorized] = useState(false);
+  const [reportPassword, setReportPassword] = useState("");
+  const [refreshLoading, setRefreshLoading] = useState(false);
+  const [layouts, setLayouts] = useState(null);
+  const [logoAspectRatio, setLogoAspectRatio] = useState(1);
+  const [dashboardFilters, setDashboardFilters] = useState([]);
+  const [filterLoading, setFilterLoading] = useState(false);
+  const [chartFilters, setChartFilters] = useState({});
+  const [initialRuntimeHydrationPending, setInitialRuntimeHydrationPending] = useState(false);
+
+  const teams = useSelector(selectTeams);
+  const charts = useSelector(selectCharts);
+  const user = useSelector(selectUser);
+
+  const [searchParams] = useSearchParams();
+  const { setTheme, isDark } = useTheme();
+  const params = useParams();
+  const dispatch = useDispatch();
+  const initLayoutRef = useRef(null);
+  const hasRunInitialFiltering = useRef(false);
+  const cacheRefreshRef = useRef(false);
+
+  const removeStyling = searchParams.get("removeStyling") === "true";
+  const removeHeader = searchParams.get("removeHeader") === "true";
+
+  const _getReportQueryParams = () => {
+    const allQueryParams = {};
+    searchParams.forEach((value, key) => {
+      allQueryParams[key] = value;
+    });
+
+    return allQueryParams;
+  };
+
+  const onDrop = useCallback((acceptedFiles) => {
+    if (!editMode) return;
+    
+    setNewChanges({ ...newChanges, logo: acceptedFiles });
+    setIsSaved(false);
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setLogoPreview(reader.result);
+    };
+
+    reader.readAsDataURL(acceptedFiles[0]);
+  }, [editMode, newChanges]);
+
+  const { getRootProps, getInputProps } = useDropzone({
+    accept: "image/*",
+    onDrop,
+  });
+
+  // Public report cache refresh. This intentionally avoids source refreshes.
+  useInterval(async () => {
+    if (!project?.id || cacheRefreshRef.current) {
+      return;
+    }
+
+    cacheRefreshRef.current = true;
+    _onRefreshCharts({
+      refresh: false,
+      getCache: true,
+      cacheOnly: true,
+      showLoading: false,
+    }).finally(() => {
+      cacheRefreshRef.current = false;
+    });
+  }, PUBLIC_REPORT_CACHE_REFRESH_INTERVAL);
+
+  useEffect(() => {
+    setLoading(true);
+    _fetchProject(window.localStorage.getItem("reportPassword"));
+
+    if (!editMode && (searchParams.get("theme") === "light" || searchParams.get("theme") === "dark")) {
+      setTheme(searchParams.get("theme"));
+    } else if (!editMode) {
+      setTheme("system");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (project?.id) {
+      setNewChanges({
+        backgroundColor: project.backgroundColor || blue,
+        titleColor: project.titleColor || "white",
+        dashboardTitle: project.dashboardTitle || project.name,
+        description: project.description,
+        logo: project.logo && `${API_HOST}/${project.logo}`,
+        headerCode: project.headerCode || "",
+        logoLink: project.logoLink,
+      });
+
+      _checkSearchParamsForFilters();
+      _checkSearchParamsForFields();
+
+      // get and format the dashboard filters
+      if (project.DashboardFilters) {
+        const formattedFilters = project.DashboardFilters.filter(f => f.onReport).map((f) => ({
+          ...f?.configuration,
+          id: f.id,
+          onReport: f.onReport,
+        }));
+
+        setDashboardFilters({ [project.id]: formattedFilters });
+      }
+    }
+  }, [project]);
+
+  useEffect(() => {
+    if (project.id
+      && (newChanges.backgroundColor !== project.backgroundColor
+      || newChanges.titleColor !== project.titleColor
+      || newChanges.dashboardTitle !== project.dashboardTitle
+      || newChanges.description !== project.description
+      || newChanges.logoLink !== project.logoLink
+      || ((newChanges.headerCode || project.headerCode !== null)
+        && newChanges.headerCode !== project.headerCode))
+    ) {
+      setIsSaved(false);
+    }
+  }, [newChanges]);
+
+  useEffect(() => {
+    if (charts && charts.length > 0 && !initLayoutRef.current) {
+      initLayoutRef.current = true;
+      // set the grid layout
+      const newLayouts = Object.keys(widthSize).reduce((acc, key) => {
+        acc[key] = [];
+        return acc;
+      }, {});
+
+      charts.forEach((chart) => {
+        if (chart.layout) {
+          Object.keys(chart.layout).forEach((key) => {
+            newLayouts[key].push({
+              i: chart.id.toString(),
+              x: chart.layout[key][0] || 0,
+              y: chart.layout[key][1] || 0,
+              w: chart.layout[key][2],
+              h: chart.layout[key][3],
+              minW: 2,
+            });
+          });
+        }
+      });
+
+      setLayouts(newLayouts);
+    }
+  }, [charts]);
+
+  useEffect(() => {
+    setChartFilters((currentChartFilters) => {
+      const nextChartFilters = {};
+
+      Object.keys(currentChartFilters || {}).forEach((chartId) => {
+        if (charts.some((chart) => `${chart.id}` === `${chartId}`)) {
+          nextChartFilters[chartId] = currentChartFilters[chartId];
+        }
+      });
+
+      return JSON.stringify(currentChartFilters) === JSON.stringify(nextChartFilters)
+        ? currentChartFilters
+        : nextChartFilters;
+    });
+  }, [charts]);
+
+  const _fetchProject = (password) => {
+    if (password) window.localStorage.setItem("reportPassword", password);
+
+    setLoading(true);
+    
+    dispatch(getReport({ 
+      brewName: params.brewName, 
+      password, 
+      token: searchParams.get("token"),
+      queryParams: _getReportQueryParams()
+    }))
+      .then((data) => {
+        if (data.error) {
+          if (data.error.message === "403") {
+            if (passwordRequired) {
+              toast.error("The password you entered is incorrect.");
+            }
+            setPasswordRequired(true);
+          } else if (data.error.message === "401") {
+            setNotAuthorized(true);
+            window.location.pathname = "/login";
+          } else {
+            setNoCharts(true);
+          }
+
+          setLoading(false);
+        } else {
+          setProject(data.payload);
+          setLoading(false);
+          setNotAuthorized(false);
+          setPasswordRequired(false);
+
+          // now get the project (mainly to check if the user can edit)
+          dispatch(getProject({ project_id: data.payload?.id }))
+            .then((projectData) => {
+              if (!projectData.payload) throw new Error(projectData.error.status);
+
+              setProject({ ...projectData.payload });
+              setEditorVisible(editMode);
+            })
+            .catch(() => {});
+          }
+      });
+  };
+
+  const _checkSearchParamsForFilters = () => {
+    // URL variables are now handled by the backend based on SharePolicy
+    // This function is kept for potential future dashboard filter handling
+    // but URL variables processing is no longer needed here
+    return;
+  };
+
+  const _checkSearchParamsForFields = () => {
+    // Field filters from URL are now handled by the backend based on SharePolicy
+    // This function is kept for potential future dashboard filter handling
+    // but URL field processing is no longer needed here
+    return;
+  };
+
+  const _isOnReport = () => {
+    return charts.filter((c) => c.onReport).length > 0;
+  };
+
+  const _onSaveChanges = () => {
+    setSaveLoading(true);
+    const updateData = clone(newChanges);
+    if (updateData.logo) delete updateData.logo;
+
+    dispatch(updateProject({ project_id: project.id, data: updateData }))
+      .then(async () => {
+        if (typeof newChanges.logo === "object" && newChanges.logo !== null) {
+          await dispatch(updateProjectLogo({ project_id: project.id, logo: newChanges.logo }));
+        }
+
+        setSaveLoading(false);
+        _fetchProject();
+        setIsSaved(true);
+        toast.success("The report has been updated!");
+      })
+      .catch(() => {
+        toast.error("Oh no! We couldn't update the dashboard. Please try again");
+      });
+  };
+
+  const _onRefreshCharts = ({
+    refresh = true,
+    getCache = false,
+    cacheOnly = false,
+    showLoading = true,
+  } = {}) => {
+    const runtimeCharts = charts.filter((chart) => chart.type !== "markdown");
+
+    if (runtimeCharts.length === 0) {
+      if (showLoading) setRefreshLoading(false);
+      return Promise.resolve("done");
+    }
+
+    if (showLoading) setRefreshLoading(true);
+    return _processChartBatches(runtimeCharts, dashboardFilters, chartFilters, { refresh, getCache, cacheOnly })
+      .then(() => {
+        if (showLoading) setRefreshLoading(false);
+      })
+      .catch(() => {
+        if (showLoading) setRefreshLoading(false);
+      });
+  };
+
+  const _canAccess = (role) => {
+    const team = teams.filter((t) => t.id === project.team_id)[0];
+    if (!team) return false;
+    const canReallyAccess = canAccess(role, user.id, team.TeamRoles);
+    return canReallyAccess;
+  };
+
+  const _onLoadLogo = ({ target: img }) => {
+    const aspectRatio = img.naturalWidth / img.naturalHeight;
+    setLogoAspectRatio(aspectRatio);
+  };
+  const _buildRuntimeRequest = (chart, currentFilters = dashboardFilters, currentChartFilters = chartFilters) => {
+    return buildChartRuntimeRequest({
+      chart,
+      dashboardFilters: currentFilters?.[project.id] || [],
+      chartFilters: currentChartFilters?.[chart.id] || [],
+    });
+  };
+
+  useEffect(() => {
+    if (filterLoading || !project?.id || charts.length === 0 || hasRunInitialFiltering.current) {
+      return;
+    }
+
+    const runtimeChartIds = charts
+      .filter((chart) => chart.type !== "markdown")
+      .filter((chart) => _buildRuntimeRequest(chart, dashboardFilters, chartFilters).hasRuntimeFilters)
+      .map((chart) => chart.id);
+
+    hasRunInitialFiltering.current = true;
+
+    if (runtimeChartIds.length === 0) {
+      return;
+    }
+
+    setInitialRuntimeHydrationPending(true);
+    _runFiltering(dashboardFilters, runtimeChartIds, chartFilters)
+      .finally(() => {
+        setInitialRuntimeHydrationPending(false);
+      });
+  }, [project?.id, dashboardFilters, charts, chartFilters, filterLoading]);
+
+  const _runChartRequest = (
+    chart,
+    currentFilters = dashboardFilters,
+    currentChartFilters = chartFilters,
+    { refresh = false, getCache = false, cacheOnly = false } = {}
+  ) => {
+    if (!chart || chart.type === "markdown") return Promise.resolve(null);
+
+    const runtimeRequest = _buildRuntimeRequest(chart, currentFilters, currentChartFilters);
+    const shouldClearRuntimeState = !runtimeRequest.hasRuntimeFilters && Boolean(chart.filterMetadata);
+
+    if (!refresh && !getCache && !cacheOnly && !shouldClearRuntimeState && !runtimeRequest.hasRuntimeFilters) {
+      return Promise.resolve(null);
+    }
+
+    if (!refresh && !getCache && !cacheOnly && shouldSkipFiltering(chart, runtimeRequest.filters, runtimeRequest.variables)) {
+      return Promise.resolve(null);
+    }
+
+    if (refresh && !runtimeRequest.hasRuntimeFilters) {
+      return dispatch(runQueryOnPublic({
+        chart_id: chart.id,
+        password: window.localStorage.getItem("reportPassword"),
+        shareToken: searchParams.get("token"),
+        accessToken: searchParams.get("accessToken"),
+        queryParams: _getReportQueryParams(),
+      })).catch(() => null);
+    }
+
+    return dispatch(runQueryWithFilters({
+      project_id: project.id,
+      chart_id: chart.id,
+      filters: runtimeRequest.filters,
+      variables: runtimeRequest.variables,
+      shareToken: searchParams.get("token"),
+      password: window.localStorage.getItem("reportPassword"),
+      accessToken: searchParams.get("accessToken"),
+      queryParams: _getReportQueryParams(),
+      refresh,
+      getCache,
+      cacheOnly,
+    })).catch(() => null);
+  };
+
+  const _processChartBatches = (chartsToProcess, currentFilters = dashboardFilters, currentChartFilters = chartFilters, options = {}, index = 0, batchSize = 5) => {
+    if (index >= chartsToProcess.length) return Promise.resolve("done");
+
+    const batch = chartsToProcess.slice(index, index + batchSize);
+    return Promise.all(batch.map((chart) => _runChartRequest(chart, currentFilters, currentChartFilters, options)))
+      .then(() => _processChartBatches(chartsToProcess, currentFilters, currentChartFilters, options, index + batchSize, batchSize));
+  };
+
+  const _runFiltering = (currentFilters = dashboardFilters, chartIds = null, currentChartFilters = chartFilters) => {
+    if (charts.length === 0) return Promise.resolve("done");
+
+    const chartsToProcess = (chartIds ? charts.filter((chart) => chartIds.includes(chart.id)) : charts)
+      .filter((chart) => chart.type !== "markdown");
+
+    setFilterLoading(true);
+    return _processChartBatches(chartsToProcess, currentFilters, currentChartFilters)
+      .then(() => {
+        setDashboardFilters(currentFilters);
+        setFilterLoading(false);
+      })
+      .catch(() => {
+        setFilterLoading(false);
+      });
+  };
+
+  const _onChartFilterChange = (chartId, nextFilters) => {
+    const updatedChartFilters = {
+      ...chartFilters,
+      [chartId]: nextFilters,
+    };
+
+    if (!nextFilters || nextFilters.length === 0) {
+      delete updatedChartFilters[chartId];
+    }
+
+    setChartFilters(updatedChartFilters);
+    _runFiltering(dashboardFilters, [chartId], updatedChartFilters);
+  };
+
+  const _onApplyFilterValue = (filters) => {
+    // URL variables are now handled by the backend, just apply dashboard filters
+    setDashboardFilters(filters);
+    _runFiltering(filters);
+  };
+
+  const _onRemoveFilter = () => {
+    // No need to do anything here since we don't store filters in localStorage
+  };
+
+  if (loading && !project?.id && !noCharts) {
+    return (
+      <>
+        <Helmet>
+          <style type="text/css">
+            {`
+            body, html {
+              background-color: transparent;
+            }
+
+            #root {
+              background-color: transparent;
+            }
+          `}
+          </style>
+        </Helmet>
+        <div style={styles.container} className="items-center">
+          <div className="h-4" />
+          <Row align="center" justify="center">
+            <ProgressCircle size="lg" aria-label="Loading" />
+          </Row>
+        </div>
+      </>
+    );
+  }
+
+  if (notAuthorized || passwordRequired) {
+    return (
+      <div>
+        <Helmet>
+          <title>
+            {newChanges.dashboardTitle || project.dashboardTitle || project.name || "Chartbrew dashboard"}
+          </title>
+          <meta name="description" content={project.description || newChanges.description || "Chartbrew dashboard"} />
+          <meta name="robots" content="noindex" />
+          <meta name="og:title" content={newChanges.dashboardTitle || project.dashboardTitle || project.name || "Chartbrew dashboard"} />
+          <meta name="og:description" content={project.description || newChanges.description || "Chartbrew dashboard"} />
+
+          {(newChanges?.headerCode || project?.headerCode) && !removeStyling && (
+            <style type="text/css">{newChanges.headerCode || project.headerCode}</style>
+          )}
+          <style type="text/css">
+            {`
+            // body {
+            //   background-color: ${blue};
+            // }
+          `}
+          </style>
+        </Helmet>
+
+        {passwordRequired && (
+          <div className="container mx-auto max-w-xl p-16">
+            <div>
+              <h3 className="text-xl font-bold font-tw">
+                Please enter the password to access this report
+              </h3>
+            </div>
+            <div className="h-2" />
+
+            <Form
+              onSubmit={(e) => {
+                e.preventDefault();
+                _fetchProject(reportPassword);
+              }}
+              className="flex flex-col gap-2"
+            >
+              <Input
+                placeholder="Enter the password here"
+                value={reportPassword}
+                type="password"
+                onChange={(e) => setReportPassword(e.target.value)}
+                size="lg"
+                fullWidth
+                variant="primary"
+              />
+              <Button
+                variant="primary"
+                loading={loading}
+                onPress={() => {}}
+                type="submit"
+              >
+                Access report
+              </Button>
+            </Form>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (noCharts && user.id) {
+    return (
+      <div>
+        <Container justify="center" className={"mt-20"}>
+          <Row justify="center">
+            <Text size="h1">
+              {"This report does not contain any charts"}
+            </Text>
+          </Row>
+          <div className="h-1" />
+          <Row justify="center">
+            <Text b>
+              {"Head back to your dashboard and add charts to the report from the individual chart settings menu."}
+            </Text>
+          </Row>
+          <div className="h-4" />
+          <Row justify="center">
+            <Button
+              onPress={() => window.history.back()}
+              variant="primary"
+              size="lg"
+            >
+              <LuChevronLeft />
+              Go back
+            </Button>
+          </Row>
+          <div className="h-1" />
+          <Row justify="center">
+            <img
+              src={instructionDashboard}
+              height={500}
+              width={1000}
+              alt="How to add charts to your report"
+              className="p-[15px]"
+              style={{ filter: "drop-shadow(1px 5px 5px rgba(0, 0, 0, 0.5))" }}
+            />
+          </Row>
+        </Container>
+      </div>
+    );
+  }
+
+  if (noCharts && !user.id) {
+    return (
+      <div>
+        <div className="container mx-auto pt-16">
+          <div className="flex flex-col items-center justify-center">
+            <img src={logo} height={50} width={50} alt="Chartbrew logo" className="rounded-none" />
+            <div className="h-2" />
+            <h3 className="text-xl font-bold font-tw">{"This report is not available"}</h3>
+            <p className="text-sm">{"This report is not available because it has no charts or it is not public."}</p>
+          </div>
+          <div className="h-2" />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="dashboard-container">
+      <Helmet>
+        <title>
+          {newChanges.dashboardTitle || project.dashboardTitle || project.name || "Chartbrew dashboard"}
+        </title>
+        <meta name="description" content={project.description || newChanges.description || "Chartbrew dashboard"} />
+        <meta name="robots" content="noindex" />
+        <meta name="og:title" content={newChanges.dashboardTitle || project.dashboardTitle || project.name || "Chartbrew dashboard"} />
+        <meta name="og:description" content={project.description || newChanges.description || "Chartbrew dashboard"} />
+        <meta name="og:image" content={project.logo ? `${API_HOST}/${project.logo}` : logo} />
+        <meta name="og:url" content={window.location.href} />
+        <meta name="og:type" content="website" />
+        <meta name="og:site_name" content={project.name || "Chartbrew dashboard"} />
+        <meta name="og:locale" content="en_US" />
+        {(newChanges?.headerCode || project?.headerCode) && !removeStyling && (
+          <style type="text/css">{newChanges.headerCode || project.headerCode}</style>
+        )}
+        <style type="text/css">
+          {`
+            html, body {
+              background-color: ${removeStyling ? (isDark ? "#000000" : "#FFFFFF") : (newChanges.backgroundColor)} !important;
+            }
+          `}
+        </style>
+      </Helmet>
+
+      {editMode && editorVisible && !preview && (
+        <aside className="fixed top-0 left-0 z-40 w-16 h-screen" aria-label="Sidebar">
+          <div className="h-full px-3 py-2 overflow-y-auto bg-gray-50 dark:bg-gray-800">
+            <div className="flex flex-col gap-4 p-2">
+              <div>
+                <Tooltip>
+                  <Tooltip.Trigger>
+                    <LinkDom to={`/dashboard/${project.id}`}>
+                      <Link className="text-foreground cursor-pointer">
+                        <LuSquareArrowLeft size={26} className="text-foreground" />
+                      </Link>
+                    </LinkDom>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content placement="right end">Back to your dashboard</Tooltip.Content>
+                </Tooltip>
+              </div>
+
+              <Separator />
+
+              <div>
+                <Tooltip>
+                  <Tooltip.Trigger>
+                    <Link className="text-foreground cursor-pointer" onPress={() => editMode && setPreview(true)}>
+                      <LuEye size={26} className="text-foreground" />
+                    </Link>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content placement="right end">Preview dashboard</Tooltip.Content>
+                </Tooltip>
+              </div>
+
+              {editMode && project?.id && _canAccess("projectEditor") && (
+                <>
+                  <div>
+                    <Tooltip>
+                      <Tooltip.Trigger>
+                        <Link className="text-foreground cursor-pointer">
+                          <div {...getRootProps()}>
+                            <input {...getInputProps()} />
+                            <LuImagePlus size={26} className="text-foreground" />
+                          </div>
+                        </Link>
+                      </Tooltip.Trigger>
+                      <Tooltip.Content placement="right end">Change logo</Tooltip.Content>
+                    </Tooltip>
+                  </div>
+                  <div>
+                    <Popover>
+                      <Popover.Trigger>
+                        <Link className="text-foreground cursor-pointer">
+                          <LuPalette size={26} className="text-foreground" />
+                        </Link>
+                      </Popover.Trigger>
+                      <Popover.Content>
+                        <Popover.Dialog>
+                          <div className="flex flex-row flex-wrap gap-2 p-4">
+                            <ColorPickerControl
+                              ariaLabel="Background color"
+                              fallbackColor="#FFFFFF"
+                              onChange={(color) => {
+                                setNewChanges((current) => ({ ...current, backgroundColor: color }));
+                              }}
+                              presetColors={defaultColors}
+                              value={newChanges.backgroundColor}
+                            />
+
+                            <ColorPickerControl
+                              ariaLabel="Text color"
+                              fallbackColor="#000000"
+                              onChange={(color) => {
+                                setNewChanges((current) => ({ ...current, titleColor: color }));
+                              }}
+                              presetColors={defaultColors}
+                              value={newChanges.titleColor}
+                            />
+                          </div>
+                        </Popover.Dialog>
+                      </Popover.Content>
+                    </Popover>
+                  </div>
+
+                  <div>
+                    <Tooltip>
+                      <Tooltip.Trigger>
+                        <Link className="text-foreground cursor-pointer" onPress={() => setEditingTitle(true)}>
+                          <LuClipboardPen size={26} className="text-foreground" />
+                        </Link>
+                      </Tooltip.Trigger>
+                      <Tooltip.Content placement="right end">Report settings</Tooltip.Content>
+                    </Tooltip>
+                  </div>
+
+                  <div>
+                    <Tooltip>
+                      <Tooltip.Trigger>
+                        <Link className="text-foreground cursor-pointer" onPress={() => setShowSettings(true)}>
+                          <LuShare size={26} className="text-foreground" />
+                        </Link>
+                      </Tooltip.Trigger>
+                      <Tooltip.Content placement="right end">Sharing settings</Tooltip.Content>
+                    </Tooltip>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </aside>
+      )}
+
+      <div className={editMode && editorVisible && !preview ? "ml-16" : ""}>
+        {!removeHeader && (
+          <header
+            className="header grow-0 flex w-full max-w-full flex-row items-center justify-between border-b border-divider py-4"
+            style={{ backgroundColor: removeStyling ? (isDark ? "#000000" : "#FFFFFF") : (newChanges.backgroundColor || project.backgroundColor || "#FFFFFF") }}
+          >
+            <div className="flex min-w-0 flex-1 flex-row items-center gap-4">
+                {editMode && editorVisible && !preview && (
+                  <div className="dashboard-logo-container" style={{ height: 45, width: 45 * logoAspectRatio }}>
+                    <img
+                      onLoad={_onLoadLogo}
+                      className="dashboard-logo"
+                      src={logoPreview || newChanges.logo || logo}
+                      alt={`${project.name} Logo`}
+                      height={45}
+                      width={45 * logoAspectRatio}
+                    />
+                  </div>
+                )}
+
+                {(!editMode || !editorVisible || preview) && (
+                  <div className="dashboard-logo-container" style={{ height: 45, width: 45 * logoAspectRatio }}>
+                    <a
+                      href={newChanges.logoLink || project.logoLink || "#"}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <img
+                        onLoad={_onLoadLogo}
+                        className="dashboard-logo"
+                        src={project.logo ? `${API_HOST}/${project.logo}` : logo}
+                        alt={`${project.name} Logo`}
+                        height={45}
+                        width={45 * logoAspectRatio}
+                      />
+                    </a>
+                  </div>
+                )}
+
+                <div className="flex flex-col max-w-[calc(100vw-100px)]">
+                  <span
+                    className="text-lg font-bold truncate"
+                    style={{ color: removeStyling ? (isDark ? "#FFFFFF" : "#000000") : (newChanges.titleColor || project.titleColor || "#000000") }}
+                  >
+                    {newChanges.dashboardTitle || project.dashboardTitle || project.name}
+                  </span>
+                  {(!editMode || !editorVisible) && project.description && (
+                    <span
+                      className="dashboard-sub-title truncate"
+                      style={{ color: removeStyling ? (isDark ? "#FFFFFF" : "#000000") : (newChanges.titleColor || project.titleColor || "#000000") }}
+                    >
+                      {project.description}
+                    </span>
+                  )}
+                  {editMode && editorVisible && newChanges.description && (
+                    <span
+                      className="dashboard-sub-title truncate"
+                      style={{ color: removeStyling ? (isDark ? "#FFFFFF" : "#000000") : (newChanges.titleColor || project.titleColor || "#000000") }}
+                    >
+                      {newChanges.description}
+                    </span>
+                  )}
+                </div>
+              </div>
+          </header>
+        )}
+
+        <div className="absolute top-4 right-4 z-50">
+          <div className="flex flex-row gap-2">
+            {editMode && !isSaved && !preview && project?.id && _canAccess("projectEditor") && (
+              <div className="hidden sm:block">
+                <Button
+                  variant="primary"
+                  isPending={saveLoading}
+                  onPress={_onSaveChanges}
+                >
+                  {saveLoading ? <ButtonSpinner /> : null}
+                  Save changes
+                  {!saveLoading ? <LuCircleCheck /> : null}
+                </Button>
+              </div>
+            )}
+            {editMode && preview && (
+              <div>
+                <Button
+                  onPress={() => editMode && setPreview(false)}
+                  variant="tertiary"
+                >
+                  Exit preview
+                  <LuCircleX />
+                </Button>
+              </div>
+            )}
+
+            {project?.Team?.allowReportRefresh && (
+              <div className="hidden sm:block">
+                <Button
+                  onPress={() => _onRefreshCharts()}
+                  isPending={refreshLoading}
+                  variant="primary"
+                >
+                  {refreshLoading ? <ButtonSpinner /> : null}
+                  Refresh charts
+                  {!refreshLoading ? <LuRefreshCw /> : null}
+                </Button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {charts && charts.length > 0 && _isOnReport() && (
+          <div className="main-container relative p-2 pt-4 pb-10 md:pt-4 md:pb-10 md:pl-4 md:pr-4">
+            {loading && charts.length === 0 && (
+              <Container style={styles.container}>
+                <div className="h-4" />
+                <Row align="center" justify="center">
+                  <ProgressCircle size="lg" aria-label="Loading" />
+                </Row>
+              </Container>
+            )}
+
+            {dashboardFilters?.[project.id]?.length > 0 && (
+              <div className="flex flex-col sm:flex-row gap-2 items-start sm:items-center bg-surface p-2 mx-2 rounded-3xl border border-divider">
+                {!filterLoading && (
+                  <div className="flex flex-row items-center gap-2">
+                    <LuListFilter size={20} />
+                    <div className="block sm:hidden text-sm">Filters</div>
+                  </div>
+                )}
+                {filterLoading && (
+                  <Spinner size="sm" aria-label="Loading" />
+                )}
+                <DashboardFilters
+                  filters={dashboardFilters}
+                  projectId={project.id}
+                  onRemoveFilter={_onRemoveFilter}
+                  onApplyFilterValue={_onApplyFilterValue}
+                  onReport
+                />
+              </div>
+            )}
+
+            {initialRuntimeHydrationPending && charts?.length > 0 && (
+              <div className="flex min-h-[320px] items-center justify-center">
+                <Spinner size="lg" aria-label="Loading dashboard filters" />
+              </div>
+            )}
+
+            {!initialRuntimeHydrationPending && layouts && charts?.length > 0 && (
+              <div className="w-full">
+                <ResponsiveGridLayout
+                  className="layout"
+                  layouts={layouts}
+                  breakpoints={widthSize}
+                  cols={cols}
+                  margin={margin}
+                  onLayoutChange={() => {}}
+                  rowHeight={150}
+                  isDraggable={false}
+                  isResizable={false}
+                >
+                  {charts.filter((c) => !c.draft && c.onReport).map((chart) => (
+                    <div key={chart.id}>
+                      {chart.type === "markdown" ? (
+                        <TextWidget
+                          isPublic
+                          chart={chart}
+                          onEditLayout={() => {}}
+                          editingLayout={false}
+                          onCancelChanges={() => {}}
+                          onSaveChanges={() => {}}
+                          onEditContent={() => {}}
+                        />
+                      ) : (
+                        <Chart
+                          isPublic
+                          chart={chart}
+                          charts={charts}
+                          dashboardFilters={dashboardFilters?.[project.id] || []}
+                          chartFilters={chartFilters?.[chart.id] || []}
+                          onAddChartFilter={_onChartFilterChange}
+                          onClearChartFilter={_onChartFilterChange}
+                          onRefreshRuntimeChart={(chartId, options = {}) => {
+                            const selectedChart = charts.find((chartItem) => chartItem.id === chartId);
+                            if (!selectedChart) return Promise.resolve(null);
+                            return _runChartRequest(selectedChart, dashboardFilters, chartFilters, options);
+                          }}
+                          className="chart-card"
+                          showExport={project.Team?.allowReportExport}
+                          password={project.password || window.localStorage.getItem("reportPassword")}
+                        />
+                      )}
+                    </div>
+                  ))}
+                </ResponsiveGridLayout>
+              </div>
+            )}
+
+            {project.Team && project.Team.showBranding && (
+              <div className="footer-content mt-4 pr-4 flex justify-end">
+                <Link
+                  className={`flex items-start !text-[${removeStyling ? "#000000" : (newChanges.titleColor || project.titleColor || "#000000")}]`}
+                  href={"https://chartbrew.com?ref=chartbrew_report"}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <span className="text-sm" style={{ color: removeStyling ? "#000000" : (newChanges.titleColor || project.titleColor || "#000000") }}>
+                    {"Powered by "}
+                  </span> 
+                  <div className="w-1" />
+                  <span className="text-sm" style={{ color: removeStyling ? "#000000" : (newChanges.titleColor || project.titleColor || "#000000") }}>
+                    <strong>{"Chart"}</strong>
+                  </span>
+                  <span className="text-sm" style={{ color: removeStyling ? "#000000" : (newChanges.titleColor || project.titleColor || "#000000") }}>
+                    {"brew"}
+                  </span>
+                </Link>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <Modal>
+        <Modal.Backdrop isOpen={editMode && editingTitle} onOpenChange={(nextOpen) => { if (!nextOpen) setEditingTitle(false); }}>
+          <Modal.Container size="lg">
+            <Modal.Dialog>
+              <Modal.Header>
+                <Text size="h4">Customize your report</Text>
+              </Modal.Header>
+              <Modal.Body className="flex flex-col gap-2 p-1">
+                <TextField name="dashboard-title">
+                  <Label>Dashboard title</Label>
+                  <Input
+                    placeholder="Enter your dashboard title"
+                    value={newChanges.dashboardTitle}
+                    onChange={(e) => {
+                      setNewChanges({ ...newChanges, dashboardTitle: e.target.value });
+                    }}
+                    variant="secondary"
+                    fullWidth
+                  />
+                </TextField>
+                <TextField name="dashboard-description">
+                  <Label>Dashboard description</Label>
+                  <Input
+                    placeholder="Enter a short description"
+                    value={newChanges.description}
+                    onChange={(e) => { setNewChanges({ ...newChanges, description: e.target.value }); }}
+                    variant="secondary"
+                    fullWidth
+                  />
+                </TextField>
+                <TextField name="company-website-url">
+                  <Label>Company website URL</Label>
+                  <Input
+                    placeholder="https://example.com"
+                    value={newChanges.logoLink}
+                    onChange={(e) => {
+                      setNewChanges({ ...newChanges, logoLink: e.target.value });
+                    }}
+                    variant="secondary"
+                    fullWidth
+                  />
+                </TextField>
+
+                <div className="h-1" />
+                <Separator />
+                <div className="h-1" />
+
+                <Label>Custom CSS</Label>
+                <div className="text-sm text-muted">Some of the main classes on the page:</div>
+                <Row wrap="wrap" className={"gap-1"}>
+                  <Chip>.main-container</Chip>
+                  <Chip>.title-container</Chip>
+                  <Chip>.dashboard-title</Chip>
+                  <Chip>.dashboard-sub-title</Chip>
+                  <Chip>.chart-grid</Chip>
+                  <Chip>.chart-container</Chip>
+                  <Chip>.chart-card</Chip>
+                </Row>
+                <Row>
+                  <div style={{ width: "100%" }}>
+                    <AceEditor
+                      mode="css"
+                      theme={isDark ? "one_dark" : "tomorrow"}
+                      height="200px"
+                      width="none"
+                      value={newChanges.headerCode}
+                      style={{ borderRadius: 10 }}
+                      onChange={(value) => {
+                        setNewChanges({ ...newChanges, headerCode: value });
+                      }}
+                      name="queryEditor"
+                      editorProps={{ $blockScrolling: true }}
+                      className="rounded-md border border-divider"
+                    />
+                  </div>
+                </Row>
+              </Modal.Body>
+              <Modal.Footer>
+                <Button
+                  variant="primary"
+                  onPress={() => setEditingTitle(false)}
+                >
+                  Preview changes
+                </Button>
+              </Modal.Footer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+
+      {editMode && project && (
+        <SharingSettings
+          open={showSettings}
+          onClose={() => setShowSettings(false)}
+          onReport={true}
+        />
+      )}
+    </div>
+  );
+}
+
+const styles = {
+  container: {
+    flex: 1,
+    flexGrow: 1,
+    // backgroundColor: blue,
+    height: window.innerHeight,
+    paddingBottom: 100,
+  },
+  mainContent: {
+    marginTop: 0,
+  },
+  dashboardTitle: (color) => ({
+    color: color || "black",
+    textAlign: "center",
+  }),
+  logoContainer: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    cursor: "pointer",
+  },
+  logoContainerMobile: {
+    // padding: 20,
+    cursor: "pointer",
+  },
+  previewBtn: {
+    position: "absolute",
+    top: 20,
+    right: 20,
+    zIndex: 10,
+  },
+  refreshBtn: (isMenuVisible) => ({
+    position: "absolute",
+    top: isMenuVisible ? 90 : 20,
+    right: 20,
+    zIndex: 10,
+  }),
+  mainContainer: (mobile) => ({
+    padding: mobile ? 0 : 20,
+    paddingTop: 20,
+    paddingBottom: 20,
+    position: "relative",
+  })
+};
+
+Report.propTypes = {
+  editMode: PropTypes.bool,
+};
+
+export default Report;

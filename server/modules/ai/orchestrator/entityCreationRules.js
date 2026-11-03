@@ -1,0 +1,310 @@
+/**
+ * Entity Creation Rules for AI Orchestrator
+ *
+ * Provides structured instructions for creating Chartbrew entities.
+ * Edit this file to adjust how the AI creates datasets, charts, etc.
+ */
+
+const {
+  getOrchestratorSources,
+} = require("./sourceSupport");
+
+function buildSupportedConnectionText() {
+  return getOrchestratorSources()
+    .map((source) => {
+      const label = source.subType && source.subType !== source.type
+        ? `${source.type}/${source.subType}`
+        : source.type;
+      return `- ${source.name}: ${label}`;
+    })
+    .join("\n");
+}
+
+const ENTITY_CREATION_RULES = `## Entity Creation Rules
+
+**Dataset:**
+- Required: team_id, connection_id, name
+- Set draft=false (visible), project_ids=[] or [project_id]
+- After DataRequest created, update main_dr_id
+- name: string - canonical reusable dataset name
+- Datasets own query/data-shape concerns only. Do not store chart binding fields (xAxis, yAxis, dateField, conditions, formula, legend) on Dataset.
+
+**Supported AI Orchestrator Sources:**
+${buildSupportedConnectionText()}
+
+**DataRequest:**
+- Required: dataset_id, connection_id
+- query: string - source query for query-based sources
+- conditions: array - database filtering conditions (optional)
+- configuration: object - dialect/source-specific settings. Required for configuration-based sources.
+- variables: array - parameterized query variables (default: [])
+- transform: object - data transformation rules (optional)
+
+Note: Sources that declare AI query generation or source-owned AI tools in the source plugin registry are available to the orchestrator.
+
+**Chart:**
+- Required: project_id, dataset_id
+- **CRITICAL: Use the EXACT project specified by the user. Never create charts in other projects for validation or testing.**
+- **CRITICAL: Create the chart exactly once. Do not create test/validation charts first.**
+- Set draft=false, dashboardOrder=max+1
+- name: string - chart name/title (optional)
+- legend: string - short legend for data points (separate from chart name, max 20-30 chars)
+- type: string - line|bar|pie|doughnut|radar|polar|table|kpi|avg|gauge|matrix
+- subType: string - "AddTimeseries" for KPI totals and cumulative charts
+- chartSize: integer - 1-4 (size: small to full-width) (default: 2)
+- displayLegend: boolean - show legend (default: true)
+- pointRadius: integer - 0(hide) >0(show points) (default: 0)
+- dataLabels: boolean - show point values (default: false)
+- includeZeros: boolean - include zero values (default: true)
+- timeInterval: string - second|minute|hour|day|week|month|year (default: "day")
+- stacked: boolean - stack bars (bar only) (default: false)
+- horizontal: boolean - horizontal bars (bar only) (default: false)
+- xLabelTicks: string - "default", "half", "third", "fourth", "showAll" (default: "default"). Use showAll when making breakdown charts where categories are not that many.
+- showGrowth: boolean - percentage growth (default: false)
+- invertGrowth: boolean - invert growth calc (default: false)
+- mode: string - "chart" or "kpichart" (default: "chart")
+- maxValue: integer - cap max value (optional)
+- minValue: integer - cap min value (optional)
+- ranges: array - gauge ranges [{min, max, label, color}] (optional)
+- layout: object - grid layout {lg: [x,y,w,h], ...} (only required if the user specifies a layout, auto-calculated if not provided)
+
+**Visualization and ChartDatasetConfig:**
+- Required ChartDatasetConfig fields: chart_id, dataset_id. The CDC binds reusable data to the chart; it does not own visual series.
+- Prefer canonical visualization.encoding roles: category or time, value, and optional breakdown. Use a complete visualization specification for multiple values/layers.
+- Put goals on the intended canonical value layer. Never copy one CDC goal to every value or generated series.
+- Legacy xAxis/yAxis arguments remain accepted for compatibility, but new chart plans should send encoding or visualization.
+- Set the CDC legend (short and concise), order=1, and datasetColor="#4285F4" for compatibility metadata.
+- IMPORTANT: Suggest a separate short legend for ChartDatasetConfig (different from chart name). Default to dataset.name || dataset.legend when no custom legend is provided.
+- xAxis: string - X axis field from query results (use 'root[].field_name' for arrays)
+- yAxis: string - Y axis field from query results (use 'root[].field_name' for arrays)
+- IMPORTANT: Always use 'root[].' prefix for database query results since they return arrays
+- Example: For results like [{"month_start": "2024-01", "count": 5}], use xAxis='root[].month_start', yAxis='root[].count'
+- xAxisOperation: string - optional x-axis operation
+- yAxisOperation: string - none, sum, avg, min, max, count (default: none)
+- dateField: string - optional date field for filtering
+- dateFormat: string - optional date format (e.g. YYYY-MM-DD)
+- conditions: array - optional chart-specific filtering conditions
+- formula: string - transform values (e.g. "{val / 100}", "£{val}") (optional)
+- fillColor: string - area/line fill color, fillColor for bar charts (optional)
+- fill: boolean - enable area fill, fill for bar charts (default: false)
+- multiFill: boolean - multiple fill colors, turn on for category charts - pie, dougnnut, bar (default: false)
+- pointRadius: integer - override point size (default: 0)
+- excludedFields: array - exclude from tables (default: [])
+- sort: string - "asc"|"desc" for tables (optional)
+- columnsOrder: array - custom table columns (optional)
+- maxRecords: integer - limit records (optional)
+- goal: integer - legacy KPI target fallback; prefer layer.goal in the canonical visualization
+- configuration: object - dataset settings (default: {})
+
+**Sequence:**
+1. Create Dataset with DataRequest using quick-create (team_id, connection_id, name, query or configuration, draft=false, dataRequests array)
+2. Create Chart with ChartDatasetConfig and canonical visualization using quick-create. Bind visualization layers to the supplied template binding and describe fields with category/time, value, and optional breakdown encodings.
+
+**Source-owned configuration sequence:**
+1. Use source_plan_dataset to create a DataRequest.configuration and chartSpec. Do not use generate_query or run_query for configuration-based sources.
+2. For generic API connections, use connection AI Context first. If a recognizable provider host returns modelFallbackAllowed=true or needs_model_planning, you may use provider/API knowledge as a fallback by passing explicit method, route, pagination/body/header assumptions, and chart bindings to the create tool.
+3. Optionally use source_validate_configuration and source_preview_configuration for compact rows/warnings.
+4. For default previews, use create_temporary_chart with connection_id, name, configuration or explicit route/method, and chartSpec bindings.
+5. For explicit dashboard placement, use create_dataset first, then create_chart with the exact requested project_id and the chartSpec bindings.
+6. If the user later confirms placement for a temporary chart, use move_chart_to_dashboard.
+7. If chart_created=true and snapshot_status="unavailable", the chart still exists. Report it as created; only mention that the rendered preview is unavailable.
+
+**CRITICAL RULES:**
+- Use the EXACT project specified by the user or context. Never create charts in different projects.
+- Create entities exactly once. Do not create test/validation versions first.
+- Respect user instructions precisely - if they specify a project, use that exact project.
+- No trial runs, no validation charts, no test datasets - create the final entity directly.
+
+Note: Both Dataset and Chart creation now use quick-create functions that handle all related entities in a single call. Layout for charts is automatically calculated if not provided.`;
+
+const SUPPORTED_CONNECTIONS = getOrchestratorSources().reduce((acc, source) => {
+  if (!acc[source.type]) {
+    acc[source.type] = {
+      subtypes: [],
+      description: source.description,
+    };
+  }
+
+  if (source.subType && !acc[source.type].subtypes.includes(source.subType)) {
+    acc[source.type].subtypes.push(source.subType);
+  }
+
+  return acc;
+}, {});
+
+// Field definitions for reference and validation
+const FIELD_SPECS = {
+  Dataset: {
+    required: ["team_id", "connection_id", "name"],
+    recommended: {
+      draft: false,
+      project_ids: [],
+      fieldsSchema: null
+    },
+    description: "Reusable query/data definition backed by DataRequests"
+  },
+
+  DataRequest: {
+    required: ["dataset_id", "connection_id"],
+    recommended: {
+      query: null,
+      conditions: [],
+      configuration: {},
+      variables: [],
+      transform: null
+    },
+    description: "Define how to fetch data from supported orchestrator sources"
+  },
+
+  Chart: {
+    required: ["project_id", "dataset_id"],
+    recommended: {
+      draft: false,
+      chartSize: 2,
+      displayLegend: true,
+      includeZeros: true,
+      timeInterval: "day",
+      pointRadius: 0,
+      dataLabels: false,
+      stacked: false,
+      horizontal: false,
+      xLabelTicks: "default",
+      showGrowth: false,
+      invertGrowth: false,
+      mode: "chart",
+      legend: null // Short legend for ChartDatasetConfig
+    },
+    conditionalFields: {
+      bar: ["stacked", "horizontal"],
+      kpi: ["subType"] // Use "AddTimeseries" for accumulating totals
+    },
+    description: "Visual representations of Datasets, placed in Projects (dashboards)"
+  },
+
+  ChartDatasetConfig: {
+    required: ["chart_id", "dataset_id"],
+    recommended: {
+      legend: null, // Use dataset name or chart title
+      xAxis: null,
+      xAxisOperation: null,
+      yAxis: null,
+      yAxisOperation: "none",
+      dateField: null,
+      dateFormat: null,
+      conditions: [],
+      order: 1,
+      datasetColor: "#4285F4",
+      fill: false,
+      multiFill: false,
+      pointRadius: 0,
+      excludedFields: [],
+      configuration: {}
+    },
+    description: "Link Charts to Datasets with chart-specific bindings and presentation settings"
+  }
+};
+
+// Common field defaults
+const DEFAULTS = {
+  chartColors: [
+    "#4285F4", "#FF9800", "#26A69A", "#D602EE", "#C0CA33",
+    "#9C27B0", "#EE6002", "#C8A1FF", "#43A047", "#D81B60"
+  ],
+  chartSize: 2,
+  timeIntervals: ["second", "minute", "hour", "day", "week", "month", "year"],
+  chartTypes: {
+    line: "trends over time, time series data",
+    bar: "comparing values across categories",
+    pie: "proportions of a whole",
+    doughnut: "proportions with emphasis on total",
+    kpi: "single value metrics",
+    avg: "average value metrics",
+    table: "tabular data display",
+    gauge: "indicator within a range"
+  }
+};
+// Helper functions for future validation/enhancement
+
+/**
+ * Get the creation rules text (for injecting into system prompt)
+ */
+function getCreationRules() {
+  return ENTITY_CREATION_RULES;
+}
+
+/**
+ * Get required fields for an entity type
+ * @param {string} entityType - "Dataset", "DataRequest", "Chart", or "ChartDatasetConfig"
+ * @returns {Array<string>} Required field names
+ */
+function getRequiredFields(entityType) {
+  return FIELD_SPECS[entityType]?.required || [];
+}
+
+/**
+ * Get recommended defaults for an entity type
+ * @param {string} entityType - Entity type name
+ * @returns {Object} Recommended field values
+ */
+function getRecommendedDefaults(entityType) {
+  return FIELD_SPECS[entityType]?.recommended || {};
+}
+
+/**
+ * Check if a connection type and subtype is supported
+ * @param {string} type - Connection type
+ * @param {string} subType - Connection subtype (optional)
+ * @returns {boolean} Whether the connection type is supported
+ */
+function isConnectionSupported(type, subType) {
+  const connectionType = SUPPORTED_CONNECTIONS[type];
+  if (!connectionType) return false;
+
+  if (subType) {
+    return connectionType.subtypes.includes(subType);
+  }
+
+  return true;
+}
+
+/**
+ * Validate entity payload (for future use in API validation)
+ * @param {string} entityType - Entity type name
+ * @param {Object} payload - Entity data to validate
+ * @returns {Object} { valid: boolean, missing: string[], warnings: string[] }
+ */
+function validateEntityPayload(entityType, payload) {
+  const spec = FIELD_SPECS[entityType];
+  if (!spec) {
+    return { valid: false, missing: ["Unknown entity type"], warnings: [] };
+  }
+
+  const missing = spec.required.filter((field) => !payload[field]);
+  const warnings = [];
+
+  // Check recommended fields
+  Object.entries(spec.recommended).forEach(([field, defaultValue]) => {
+    if (payload[field] === undefined && defaultValue !== null) {
+      warnings.push(`Recommended field "${field}" not set (default: ${defaultValue})`);
+    }
+  });
+
+  return {
+    valid: missing.length === 0,
+    missing,
+    warnings
+  };
+}
+
+module.exports = {
+  ENTITY_CREATION_RULES,
+  FIELD_SPECS,
+  DEFAULTS,
+  SUPPORTED_CONNECTIONS,
+  // Helper functions
+  getCreationRules,
+  getRequiredFields,
+  getRecommendedDefaults,
+  isConnectionSupported,
+  validateEntityPayload
+};

@@ -1,0 +1,391 @@
+import React, { useEffect, useRef, useState } from "react";
+import { LuArrowLeft, LuBrainCircuit, LuClipboard, LuClipboardCheck, LuCompass, LuSearch } from "react-icons/lu";
+import { Button, Card, Chip, Input, InputGroup, Surface, TextField, Tooltip } from "@heroui/react";
+import { useDispatch, useSelector } from "react-redux";
+import { useNavigate, useParams } from "react-router";
+import toast from "react-hot-toast";
+import { Link, useSearchParams } from "react-router";
+
+import {
+  getSourceLogo,
+  getSourcePickerItems,
+  getSourcePlugin,
+  isSourceAiPowered,
+} from "../../sources";
+import { canCreateSourceConnections } from "../../sources/sourceAvailability";
+import { useTheme } from "../../modules/ThemeContext";
+import { addConnection, addFilesToConnection, getConnection, getTeamConnections, saveConnection } from "../../slices/connection";
+import HelpBanner from "../../components/HelpBanner";
+import { generateInviteUrl, selectTeam } from "../../slices/team";
+import canAccess from "../../config/canAccess";
+import { selectUser } from "../../slices/user";
+
+function ConnectionWizard() {
+  const [connectionSearch, setConnectionSearch] = useState("");
+  const [selectedType, setSelectedType] = useState("");
+  const [newConnection, setNewConnection] = useState(null);
+  const [inviteUrl, setInviteUrl] = useState("");
+  const [inviteCopied, setInviteCopied] = useState(false);
+  const [connectionToEdit, setConnectionToEdit] = useState(null);
+
+  const { isDark } = useTheme();
+  const initRef = useRef(null);
+  const bottomRef = useRef(null);
+  const asideRef = useRef(null);
+  const paramsInitRef = useRef(null);
+  const fetchConnectionRef = useRef(null);
+  const dispatch = useDispatch();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const params = useParams();
+
+  const user = useSelector(selectUser);
+  const team = useSelector(selectTeam);
+
+  useEffect(() => {
+    if (team?.id && !initRef.current) {
+      initRef.current = true;
+      dispatch(getTeamConnections({ team_id: team.id }));
+      dispatch(generateInviteUrl({
+        team_id: team.id,
+        projects: [],
+        canExport: true,
+        role: "teamAdmin",
+      }))
+        .then((data) => {
+          setInviteUrl(data.payload);
+        }).catch(() => {});
+    }
+  }, [team]);
+
+  useEffect(() => {
+    if (selectedType) {
+      bottomRef?.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "end",
+        inline: "nearest",
+      });
+
+      setTimeout(() => {
+        asideRef?.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "end",
+          inline: "nearest",
+        });
+      }, 500);
+    }
+  }, [selectedType]);
+
+  useEffect(() => {
+    if (params.connectionId && params.connectionId !== "new" && team?.id && !paramsInitRef.current) {
+      paramsInitRef.current = true;
+      dispatch(getConnection({ team_id: team.id, connection_id: params.connectionId }))
+        .then((res) => {
+          if (res?.payload) {
+            setConnectionToEdit(res.payload);
+          }
+        });
+    }
+  }, [params, team]);
+
+  useEffect(() => {
+    if (searchParams.get("type")) {
+      setSelectedType(searchParams.get("type"));
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (connectionToEdit && !fetchConnectionRef.current) {
+      fetchConnectionRef.current = true;
+      setNewConnection({ ...connectionToEdit });
+      setSelectedType(connectionToEdit.subType || connectionToEdit.type);
+    }
+  }, [connectionToEdit]);
+
+  const availableSources = getSourcePickerItems();
+  let selectedSource = null;
+  try {
+    selectedSource = selectedType ? getSourcePlugin(selectedType) : null;
+  } catch {
+    selectedSource = null;
+  }
+  const canRenderSelectedForm = Boolean(newConnection || canCreateSourceConnections(selectedSource));
+  const SelectedConnectionForm = canRenderSelectedForm ? selectedSource?.frontend?.ConnectionForm : null;
+
+  const _filteredConnections = availableSources.filter((conn) => {
+    if (connectionSearch) {
+      return conn.name.toLowerCase().includes(connectionSearch.toLowerCase());
+    }
+    return true;
+  });
+
+  const _onAddNewConnection = (data, files) => {
+    if (params.connectionId !== "new") {
+      return dispatch(saveConnection({ team_id: team.id, connection: data }))
+        .then(async () => {
+          if (files) {
+            await dispatch(addFilesToConnection({ team_id: team.id, connection_id: params.connectionId, files }));
+          }
+
+          toast.success("Connection saved successfully");
+          return true;
+        })
+        .catch(() => {
+          return false;
+        });
+    }
+
+    return dispatch(addConnection({
+        team_id: team.id,
+        connection: { ...data, team_id: team.id }
+      }))
+      .then(async (createdConnection) => {
+        if (createdConnection.error) {
+          return false;
+        }
+
+        if (files) {
+          dispatch(addFilesToConnection({ team_id: team.id, connection_id: createdConnection.payload.id, files }));
+        }
+
+        if (data.type === "googleAnalytics") {
+          navigate(`/connections/${createdConnection.payload.id}`);
+          return true;
+        }
+
+        setSelectedType("");
+
+        navigate(`/connections/${createdConnection.payload.id}/templates`);
+        const resp = await dispatch(getConnection({ team_id: team.id, connection_id: createdConnection.payload.id }));
+        setConnectionToEdit(resp.payload);
+
+        return true;
+      })
+      .catch(() => {
+        return false;
+      });
+  };
+
+  const _onCopyInviteUrl = () => {
+    navigator.clipboard.writeText(inviteUrl);
+    setInviteCopied(true);
+    setTimeout(() => {
+      setInviteCopied(false);
+    }, 2000);
+  };
+
+  const _canAccess = (role, teamRoles) => {
+    return canAccess(role, user.id, teamRoles);
+  };
+
+  if (!_canAccess("teamAdmin", team.TeamRoles)) {
+    return (
+      <div>
+        <div className="flex flex-col items-center justify-center h-screen">
+          <span className="text-xl text-secondary font-semibold">{"You don't have access to this page"}</span>
+          <div className="h-4" />
+          <Button
+            variant="primary"
+            onPress={() => navigate("/")}
+          >
+            Return to dashboard
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex flex-col">
+        <div className="sm:mr-96">          
+          <div className="h-2" />
+
+          {!newConnection && (
+            <>
+              <div className="flex flex-row items-center gap-2">
+                <span className="text-xl text-secondary font-semibold">Step 1:</span>
+                <span className="text-xl font-semibold">Select your datasource type</span>
+              </div>
+              <div className="h-4" />
+              <Surface className="rounded-3xl bg-surface border border-divider p-4">
+                <div className="flex flex-row justify-between items-center flex-wrap gap-2">
+                  <TextField aria-label="Search connections" className="sm:min-w-md" name="connection-search">
+                    <InputGroup fullWidth variant="secondary">
+                      <InputGroup.Input
+                        placeholder="Search connections..."
+                        onChange={(e) => setConnectionSearch(e.target.value)}
+                      />
+                      <InputGroup.Suffix className="pr-2">
+                        <LuSearch className="size-4 text-muted" aria-hidden />
+                      </InputGroup.Suffix>
+                    </InputGroup>
+                  </TextField>
+                </div>
+                <div className="h-4" />
+                <div className="grid grid-cols-12 gap-4">
+                  {_filteredConnections.map((conn) => (
+                    <div key={conn.name} className="col-span-12 sm:col-span-6 lg:col-span-6 xl:col-span-3">
+                      <Card
+                        role="button"
+                        tabIndex={0}
+                        className={`w-full h-full cursor-pointer shadow-none transition-colors hover:bg-content2/40 ${selectedType === conn.id ? "border border-primary" : "border border-content3"}`}
+                        onClick={() => setSelectedType(conn.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setSelectedType(conn.id);
+                          }
+                        }}
+                      >
+                        <Card.Content className="overflow-visible p-4 max-w-sm flex flex-row items-center justify-center">
+                          <img
+                            alt={conn.name}
+                            className="h-[80px] rounded-lg object-contain"
+                            src={getSourceLogo(conn, isDark)}
+                          />
+                        </Card.Content>
+                        <Card.Content className="flex flex-row items-center justify-center flex-wrap gap-1">
+                          {isSourceAiPowered(conn) && (
+                            <Tooltip>
+                              <Tooltip.Trigger>
+                                <Chip variant="secondary">
+                                  <LuBrainCircuit size={14} />
+                                  {"AI-powered"}
+                                </Chip>
+                              </Tooltip.Trigger>
+                              <Tooltip.Content>
+                                You can use AI to ask questions about your data
+                              </Tooltip.Content>
+                            </Tooltip>
+                          )}
+                          {conn.showNewBadge && (
+                            <Chip variant="soft" color="accent">
+                              <Chip.Label>{"New!"}</Chip.Label>
+                            </Chip>
+                          )}
+                        </Card.Content>
+                        <Card.Footer className="justify-center flex flex-col gap-1">
+                          <span className="text-sm font-semibold">{conn.name}</span>
+                        </Card.Footer>
+                      </Card>
+                    </div>
+                  ))}
+                  {_filteredConnections.length === 0 && (
+                    <div className="col-span-12">
+                      <p className="text-center text-gray-500">No connections found</p>
+                    </div>
+                  )}
+                </div>
+              </Surface>
+
+              <div className="h-4" />
+              {selectedType && (
+                <div className="flex flex-row items-center gap-2">
+                  <span className="text-xl text-secondary font-semibold">Step 2:</span>
+                  <span className="text-xl font-semibold">Connect to your data source</span>
+                </div>
+              )}
+            </>
+          )}
+
+          {newConnection && (
+            <Link to="/connections" className="text-foreground flex flex-row items-center gap-2">
+              <div className="p-1 rounded-lg bg-surface-tertiary">
+                <LuArrowLeft size={18} className="text-foreground" />
+              </div>
+              <span className="text-foreground font-semibold">Back to connections</span>
+            </Link>
+          )}
+          <div className="h-4" />
+
+          {SelectedConnectionForm && (
+            <SelectedConnectionForm
+              onComplete={_onAddNewConnection}
+              editConnection={newConnection}
+              subType={selectedSource.subType || selectedSource.type}
+            />
+          )}
+
+          <div ref={bottomRef} />
+        </div>
+        <aside className="hidden sm:block fixed top-0 right-0 z-40 w-96 h-screen" aria-label="Sidebar">
+          <div className="h-full px-3 py-4 overflow-y-auto bg-surface dark:bg-gray-800">
+            <div className="flex flex-col gap-2 p-2">
+              <div className="h-10" />
+
+              <Card className="border border-divider shadow-none">
+                <Card.Header className="flex flex-col items-start">
+                  <p className="font-semibold">Missing the data source credentials?</p>
+                </Card.Header>
+                <Card.Content>
+                  <p className="text-sm text-gray-500">
+                    {"Someone from your engineering team can help you with this."}
+                  </p>
+                  <div className="h-4" />
+                  <p className="text-sm text-gray-500">
+                    Ask them to join your team with this link
+                  </p>
+                  <div className="h-2" />
+                  <Input
+                    readOnly
+                    labelPlacement="outside"
+                    value={inviteUrl}
+                  />
+                </Card.Content>
+                <Card.Footer>
+                  <Button
+                    size="sm"
+                    variant={inviteCopied ? "tertiary" : "primary"}
+                    fullWidth
+                    onPress={() => _onCopyInviteUrl()}
+                  >
+                    {inviteCopied ? "Copied to clipboard" : "Copy invite link"}
+                    {inviteCopied ? <LuClipboardCheck /> : <LuClipboard />}
+                  </Button>
+                </Card.Footer>
+              </Card>
+
+              <div className="h-2" />
+
+              <Card className="border border-divider shadow-none">
+                <Card.Header className="flex flex-col items-start">
+                  <p className="font-semibold">Check out our tutorials</p>
+                </Card.Header>
+                <Card.Content>
+                  <p className="text-sm text-gray-500">
+                    {"We have a number of tutorials that can help you get started with Chartbrew and learn more about the platform."}
+                  </p>
+                </Card.Content>
+                <Card.Footer>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    fullWidth
+                    onPress={() => window.open("https://chartbrew.com/blog?tag=tutorial", "_blank")}
+                  >
+                    Open the tutorials
+                    <LuCompass />
+                  </Button>
+                </Card.Footer>
+              </Card>
+
+              <div className="h-2" />
+
+              {selectedType && (
+                <HelpBanner
+                  type={selectedType}
+                  imageUrl={getSourceLogo(selectedSource, isDark)}
+                />
+              )}
+            </div>
+
+            <div ref={asideRef} />
+          </div>
+        </aside>
+      </div>
+    </div>
+  )
+}
+
+export default ConnectionWizard
